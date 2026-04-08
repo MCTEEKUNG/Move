@@ -7,6 +7,7 @@ pub mod tls;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 use active_client::ActiveClientState;
 use audio::ServerAudio;
 use input_capture::{SeamlessState, SharedSeamlessState};
@@ -33,6 +34,7 @@ pub struct ServerHandle {
     pub pending_file_requests: PendingRequests,
     file_send_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>,
     seamless: SharedSeamlessState,
+    mic_muted: Arc<AtomicBool>,
 }
 
 impl ServerHandle {
@@ -69,6 +71,17 @@ impl ServerHandle {
         std::env::var("COMPUTERNAME")
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| "netshare-node".to_owned())
+    }
+
+    /// Mute / unmute this machine's microphone stream.
+    pub fn set_mic_muted(&self, muted: bool) {
+        use std::sync::atomic::Ordering;
+        self.mic_muted.store(muted, Ordering::Relaxed);
+    }
+
+    pub fn is_mic_muted(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.mic_muted.load(Ordering::Relaxed)
     }
 }
 
@@ -168,7 +181,10 @@ pub fn start(bind_addr: &str) -> anyhow::Result<ServerHandle> {
     let active  = ActiveClientState::default();
     let audio   = ServerAudio::start().unwrap_or_else(|e| {
         tracing::warn!("Audio subsystem unavailable (audio disabled): {e}");
-        ServerAudio { mic_target: Arc::new(Mutex::new(None)) }
+        ServerAudio {
+            mic_target: Arc::new(Mutex::new(None)),
+            mic_muted:  Arc::new(AtomicBool::new(false)),
+        }
     });
     let tls     = ServerTls::generate()?;
     let pending: PendingRequests = Arc::new(Mutex::new(Vec::new()));
@@ -219,6 +235,7 @@ pub fn start(bind_addr: &str) -> anyhow::Result<ServerHandle> {
     // Control channel.
     let bind = bind_addr.to_owned();
     let active_for_net = active.clone();
+    let mic_muted    = Arc::clone(&audio.mic_muted);
     let pairing = tls.pairing_code.clone();
     let tls_for_net = tls.clone();
     let seamless_for_net = seamless.clone();
@@ -227,7 +244,6 @@ pub fn start(bind_addr: &str) -> anyhow::Result<ServerHandle> {
             tracing::error!("Server network error: {e}");
         }
     });
-
     let pairing_code = tls.pairing_code.clone();
-    Ok(ServerHandle { active, pairing_code, pending_file_requests: pending, file_send_tx, seamless })
+    Ok(ServerHandle { active, pairing_code, pending_file_requests: pending, file_send_tx, seamless, mic_muted })
 }

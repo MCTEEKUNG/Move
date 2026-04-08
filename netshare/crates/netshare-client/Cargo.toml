@@ -34,3 +34,7 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",       # SetCursorPos, GetSystemMetrics, GetCursorPos
     "Win32_Foundation",                   # BOOL, POINT
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev  = "0.12"
+x11rb  = { version = "0.13", features = ["allow-unsafe-code"] }

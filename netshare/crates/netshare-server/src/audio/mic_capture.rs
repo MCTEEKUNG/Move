@@ -1,8 +1,12 @@
-/// Audio capture: CPAL loopback (speaker) → Opus encode → UDP → active client.
+/// Audio capture: CPAL microphone input → Opus encode → UDP → active client.
+///
+/// Uses the default INPUT device (microphone), NOT speaker loopback.
+/// Loopback would echo back anything the server is playing from the client,
+/// creating a feedback loop.  Mic input avoids this at the software level.
 ///
 /// Architecture
 /// ┌─────────────────────────┐
-/// │  CPAL loopback callback  │  (OS audio thread)
+/// │  CPAL mic input callback │  (OS audio thread)
 /// │  accumulate → 960 f32   │
 /// └────────┬────────────────┘
 ///          │ std::sync::mpsc
@@ -18,6 +22,7 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -26,7 +31,10 @@ use tracing::{info, warn};
 
 use super::{CHANNELS, FRAME_INTERLEAVED, SAMPLE_RATE};
 
-pub fn start(mic_target: Arc<Mutex<Option<SocketAddr>>>) -> Result<()> {
+pub fn start(
+    mic_target: Arc<Mutex<Option<SocketAddr>>>,
+    muted: Arc<AtomicBool>,
+) -> Result<()> {
     let (sync_tx, sync_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(8);
     let (async_tx, mut async_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
 
@@ -34,15 +42,14 @@ pub fn start(mic_target: Arc<Mutex<Option<SocketAddr>>>) -> Result<()> {
     std::thread::spawn(move || {
         // Catch any CPAL panic so it doesn't kill the whole process.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let host   = cpal::default_host();
-        
-        // Find the default output device for loopback capture.
-        // On Windows, WASAPI allows capturing the output of a device.
-        let device = match host.default_output_device() {
+        let host = cpal::default_host();
+
+        // Use the default INPUT device (real microphone), not speaker loopback.
+        let device = match host.default_input_device() {
             Some(d) => d,
-            None    => { warn!("no output device — system audio capture disabled"); return; }
+            None    => { warn!("no input device — mic capture disabled"); return; }
         };
-        info!("System audio capture device: {}", device.name().unwrap_or_default());
+        info!("Mic capture device: {}", device.name().unwrap_or_default());
 
         let config = cpal::StreamConfig {
             channels:    CHANNELS,
@@ -103,6 +110,9 @@ pub fn start(mic_target: Arc<Mutex<Option<SocketAddr>>>) -> Result<()> {
         let mut out_buf = vec![0u8; 4000]; // max Opus packet size
 
         while let Some(pcm) = async_rx.recv().await {
+            // Drop frame if mic is muted.
+            if muted.load(Ordering::Relaxed) { continue; }
+
             let target = *mic_target.lock().unwrap();
             let Some(addr) = target else { continue };
 

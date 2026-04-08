@@ -117,10 +117,7 @@ pub async fn run_client(
             ControlPacket::CursorEnter { x, y, return_edge } => {
                 info!("CursorEnter at ({x},{y}), return_edge={return_edge:?}");
                 // Place cursor at the specified position.
-                #[cfg(target_os = "windows")]
-                unsafe {
-                    let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(x, y);
-                }
+                set_cursor_pos(x, y);
 
                 // Use the return_edge from the packet; also store in gui state.
                 let (sw, sh) = {
@@ -193,37 +190,71 @@ where
 
 // ── Platform helpers ──────────────────────────────────────────────────────────
 
+#[cfg(target_os = "windows")]
 fn get_screen_width() -> i32 {
-    #[cfg(target_os = "windows")]
     unsafe {
         windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
             windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN
         )
     }
-    #[cfg(not(target_os = "windows"))]
-    { 1920 }
 }
-
+#[cfg(target_os = "windows")]
 fn get_screen_height() -> i32 {
-    #[cfg(target_os = "windows")]
     unsafe {
         windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
             windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN
         )
     }
-    #[cfg(not(target_os = "windows"))]
-    { 1080 }
+}
+#[cfg(target_os = "windows")]
+fn get_cursor_pos() -> (i32, i32) {
+    let mut pt = windows::Win32::Foundation::POINT::default();
+    unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt); }
+    (pt.x, pt.y)
+}
+#[cfg(target_os = "windows")]
+fn set_cursor_pos(x: i32, y: i32) {
+    unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(x, y); }
 }
 
-fn get_cursor_pos() -> (i32, i32) {
-    #[cfg(target_os = "windows")]
-    {
-        let mut pt = windows::Win32::Foundation::POINT::default();
-        unsafe {
-            let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt);
-        }
-        (pt.x, pt.y)
-    }
-    #[cfg(not(target_os = "windows"))]
-    { (0, 0) }
+#[cfg(target_os = "linux")]
+fn get_screen_width() -> i32 {
+    let Ok((conn, screen_num)) = x11rb::connect(None) else { return 1920 };
+    let setup = conn.setup();
+    setup.roots[screen_num].width_in_pixels as i32
 }
+
+#[cfg(target_os = "linux")]
+fn get_screen_height() -> i32 {
+    let Ok((conn, screen_num)) = x11rb::connect(None) else { return 1080 };
+    let setup = conn.setup();
+    setup.roots[screen_num].height_in_pixels as i32
+}
+
+#[cfg(target_os = "linux")]
+fn get_cursor_pos() -> (i32, i32) {
+    use x11rb::protocol::xproto::ConnectionExt;
+    let Ok((conn, screen_num)) = x11rb::connect(None) else { return (0, 0) };
+    let root = conn.setup().roots[screen_num].root;
+    let Ok(reply) = conn.query_pointer(root).and_then(|c| c.reply()) else { return (0, 0) };
+    (reply.root_x as i32, reply.root_y as i32)
+}
+
+#[cfg(target_os = "linux")]
+fn set_cursor_pos(x: i32, y: i32) {
+    use x11rb::protocol::xproto::ConnectionExt;
+    let Ok((conn, screen_num)) = x11rb::connect(None) else { return };
+    let root = conn.setup().roots[screen_num].root;
+    conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, x as i16, y as i16).ok();
+    conn.flush().ok();
+}
+
+// Fallback for any other OS (macOS, etc.)
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn get_screen_width() -> i32 { 1920 }
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn get_screen_height() -> i32 { 1080 }
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn get_cursor_pos() -> (i32, i32) { (0, 0) }
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn set_cursor_pos(_x: i32, _y: i32) {}

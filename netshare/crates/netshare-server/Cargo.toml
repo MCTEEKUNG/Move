@@ -29,6 +29,9 @@ crc32fast  = "1.4"
 arboard    = "3"
 walkdir    = "2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.12"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",       # SetWindowsHookEx, WH_MOUSE_LL, WH_KEYBOARD_LL

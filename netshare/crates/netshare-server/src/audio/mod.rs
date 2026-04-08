@@ -8,6 +8,7 @@ pub mod audio_sink;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 
 /// 48 kHz, stereo, 10 ms frames → 480 samples/ch → 960 interleaved f32 per frame.
@@ -21,6 +22,8 @@ pub struct ServerAudio {
     /// Where to send mic audio (active client's IP + port 9002).
     /// Updated by the network layer when the active client changes.
     pub mic_target: Arc<Mutex<Option<SocketAddr>>>,
+    /// When true, mic frames are silently dropped before encoding/sending.
+    pub mic_muted: Arc<AtomicBool>,
 }
 
 impl ServerAudio {
@@ -28,19 +31,28 @@ impl ServerAudio {
     /// If audio hardware is unavailable, returns a no-op instance (server still works).
     pub fn start() -> Result<Self> {
         let mic_target: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+        let mic_muted: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
-        if let Err(e) = mic_capture::start(Arc::clone(&mic_target)) {
+        if let Err(e) = mic_capture::start(Arc::clone(&mic_target), Arc::clone(&mic_muted)) {
             tracing::warn!("Mic capture disabled: {e}");
         }
         if let Err(e) = audio_sink::start(9001) {
             tracing::warn!("Audio sink disabled: {e}");
         }
 
-        Ok(Self { mic_target })
+        Ok(Self { mic_target, mic_muted })
     }
 
     /// Called by the network layer when the active client changes.
     pub fn set_mic_target(&self, addr: Option<SocketAddr>) {
         *self.mic_target.lock().unwrap() = addr;
+    }
+
+    pub fn set_mic_muted(&self, muted: bool) {
+        self.mic_muted.store(muted, Ordering::Relaxed);
+    }
+
+    pub fn is_mic_muted(&self) -> bool {
+        self.mic_muted.load(Ordering::Relaxed)
     }
 }

@@ -37,15 +37,17 @@ impl Default for ActiveClientState {
 
 impl ActiveClientState {
     /// Register a new client. Returns the assigned slot (1-9).
+    ///
+    /// In seamless-cursor mode, `active_slot` intentionally stays 0 (server
+    /// owns its cursor) until the cursor physically crosses a screen edge and
+    /// `force_active(slot)` is called from the EdgeEnter handler.  Switching
+    /// automatically here would forward all server mouse moves to the client
+    /// the moment it connects — defeating edge detection entirely.
     pub fn register(&self, name: String, peer: SocketAddr) -> u8 {
         let mut g = self.0.lock().unwrap();
         let slot = g.next_slot;
         g.next_slot = (slot % 9) + 1;
         g.clients.push(ClientInfo { slot, name, peer, last_ping_ms: 0 });
-        // First client becomes active automatically.
-        if g.active_slot == 0 {
-            g.active_slot = slot;
-        }
         slot
     }
 

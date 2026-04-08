@@ -358,47 +358,137 @@ impl NetShareApp {
 
     fn render_settings(&mut self, ui: &mut egui::Ui) {
         ui.heading("System Configuration");
-        ui.add_space(20.0);
-        
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.group(|ui| {
-                    ui.set_width(300.0);
-                    ui.label(RichText::new("Local Machine").strong().color(Color32::from_rgb(0, 218, 243)));
-                    ui.add_space(10.0);
-                    ui.label(format!("Hostname: {}", gethostname()));
-                    ui.label(format!("Role: Shared Console"));
-                    ui.label(format!("Address: {}", self.bind_addr));
-                });
+        ui.add_space(12.0);
 
-                if let Some(handle) = &self.services.server {
-                    ui.group(|ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new("Connected Assets").strong().color(Color32::from_rgb(0, 218, 243)));
-                        ui.add_space(10.0);
-                        let clients = handle.clients();
-                        if clients.is_empty() {
-                            ui.label(RichText::new("No remote clients linked").small().color(Color32::GRAY));
-                        } else {
-                            for (slot, name) in clients {
-                                ui.label(format!("[Slot {slot}] {name}"));
-                            }
-                        }
-                    });
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // ── Local machine ─────────────────────────────────────────────
+            ui.group(|ui| {
+                ui.label(RichText::new("Local Machine").strong()
+                    .color(Color32::from_rgb(0, 218, 243)));
+                ui.add_space(6.0);
+                ui.label(format!("Hostname : {}", gethostname()));
+                ui.label(format!("Address  : {}", self.bind_addr));
+                if let Some(c) = &self.services.client {
+                    let s = c.state.lock().unwrap();
+                    ui.label(format!("Connected to : {}", c.server_addr()));
+                    use netshare_client::ConnectionStatus;
+                    let status = match &s.status {
+                        ConnectionStatus::Connected => "Connected",
+                        ConnectionStatus::Connecting => "Connecting…",
+                        ConnectionStatus::Disconnected(_) => "Disconnected",
+                    };
+                    ui.label(format!("Client status: {status}"));
                 }
             });
 
-            ui.add_space(20.0);
+            ui.add_space(12.0);
+
+            // ── Audio controls ────────────────────────────────────────────
             ui.group(|ui| {
-                ui.label(RichText::new("Behavior").strong());
-                ui.add_space(10.0);
-                ui.checkbox(&mut self.auto_connect, "Discover and Link automatically");
-                ui.checkbox(&mut true, "Universal Clipboard Shared");
-                ui.checkbox(&mut true, "Launch at Startup (Minimized)");
+                ui.label(RichText::new("Audio").strong()
+                    .color(Color32::from_rgb(0, 218, 243)));
+                ui.add_space(6.0);
+                if let Some(handle) = &self.services.server {
+                    let mut muted = handle.is_mic_muted();
+                    if ui.checkbox(&mut muted, "🎙 Mute my microphone (prevent echo)")
+                        .changed()
+                    {
+                        handle.set_mic_muted(muted);
+                        log_info(if muted { "Mic muted" } else { "Mic unmuted" });
+                    }
+                    ui.label(
+                        RichText::new(
+                            "Tip: if you hear your own voice echoed, mute this machine's \
+                             mic or use headphones.",
+                        ).small().color(Color32::GRAY),
+                    );
+                }
             });
 
-            ui.add_space(20.0);
-            if ui.button(RichText::new("Restart Core Engine").color(Color32::from_rgb(255, 100, 100))).clicked() {
+            ui.add_space(12.0);
+
+            // ── Display layout — edge assignment per client ───────────────
+            if let Some(handle) = &mut self.services.server {
+                let clients = handle.clients();
+                if !clients.is_empty() {
+                    ui.group(|ui| {
+                        ui.label(RichText::new("Display Layout").strong()
+                            .color(Color32::from_rgb(0, 218, 243)));
+                        ui.label(
+                            RichText::new(
+                                "Set which edge of THIS screen each client is positioned at.\n\
+                                 The cursor will transfer when it reaches that edge.",
+                            ).small().color(Color32::GRAY),
+                        );
+                        ui.add_space(8.0);
+
+                        let mut layout  = handle.layout();
+                        let mut changed = false;
+
+                        for (slot, name) in &clients {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("[{slot}] {name}:"));
+                                ui.add_space(8.0);
+
+                                use netshare_core::layout::{ClientEdge, Placement};
+                                let current_edge = layout.placements.get(slot).map(|p| p.edge);
+
+                                for (edge, label) in [
+                                    (ClientEdge::Left,  "◀ Left"),
+                                    (ClientEdge::Right, "Right ▶"),
+                                    (ClientEdge::Above, "▲ Above"),
+                                    (ClientEdge::Below, "Below ▼"),
+                                ] {
+                                    let selected = current_edge == Some(edge);
+                                    if ui.selectable_label(selected, label).clicked() && !selected {
+                                        let (cw, ch) = layout.placements.get(slot)
+                                            .map(|p| (p.client_width, p.client_height))
+                                            .unwrap_or((1920, 1080));
+                                        // Remove any other slot at this edge first.
+                                        layout.placements.retain(|_, p| p.edge != edge);
+                                        layout.placements.insert(*slot, Placement {
+                                            edge,
+                                            client_width: cw,
+                                            client_height: ch,
+                                        });
+                                        changed = true;
+                                        log_info(&format!(
+                                            "Layout: [{}] {} → {:?} edge", slot, name, edge
+                                        ));
+                                    }
+                                }
+
+                                // Clear button
+                                if current_edge.is_some() &&
+                                    ui.small_button("✕").on_hover_text("Unassign").clicked()
+                                {
+                                    layout.placements.remove(slot);
+                                    changed = true;
+                                }
+                            });
+                        }
+
+                        if changed {
+                            layout.save();
+                            handle.set_layout(layout);
+                        }
+                    });
+
+                    ui.add_space(12.0);
+                }
+            }
+
+            // ── Behaviour ────────────────────────────────────────────────
+            ui.group(|ui| {
+                ui.label(RichText::new("Behavior").strong());
+                ui.add_space(6.0);
+                ui.checkbox(&mut self.auto_connect, "Auto-discover and connect to peers on LAN");
+            });
+
+            ui.add_space(12.0);
+            if ui.button(RichText::new("⟳  Restart Server Engine")
+                .color(Color32::from_rgb(255, 120, 80))).clicked()
+            {
                 self.start_server();
             }
         });
