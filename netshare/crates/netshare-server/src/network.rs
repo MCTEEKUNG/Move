@@ -1,4 +1,4 @@
-/// Server TCP network layer.
+/// Server TCP network layer — control channel on TCP :9000, TLS-wrapped.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -15,13 +15,19 @@ use netshare_core::{
 use crate::active_client::ActiveClientState;
 use crate::audio::ServerAudio;
 use crate::input_capture::{self, CaptureEvent, HotkeyAction};
+use crate::tls::ServerTls;
 
 type ClientTx  = mpsc::UnboundedSender<ControlPacket>;
 type ClientMap = Arc<Mutex<HashMap<u8, ClientTx>>>;
 
-pub async fn run_server(addr: &str, audio: ServerAudio) -> anyhow::Result<()> {
+pub async fn run_server(
+    addr: &str,
+    audio: ServerAudio,
+    state: ActiveClientState,
+    tls: ServerTls,
+    pairing_code: String,
+) -> anyhow::Result<()> {
     let listener   = TcpListener::bind(addr).await?;
-    let state      = ActiveClientState::default();
     let client_map: ClientMap = Arc::new(Mutex::new(HashMap::new()));
     let audio      = Arc::new(audio);
 
@@ -42,7 +48,10 @@ pub async fn run_server(addr: &str, audio: ServerAudio) -> anyhow::Result<()> {
                 CaptureEvent::InputPacket(pkt) => {
                     let active = fan_state.active_slot();
                     if active == 0 { continue; }
-                    if let Some(tx) = fan_map.lock().unwrap().get(&active) {
+                    let map = fan_map.lock().unwrap();
+                    if fan_state.broadcast_mode() {
+                        for tx in map.values() { let _ = tx.send(pkt.clone()); }
+                    } else if let Some(tx) = map.get(&active) {
                         let _ = tx.send(pkt);
                     }
                 }
@@ -52,9 +61,7 @@ pub async fn run_server(addr: &str, audio: ServerAudio) -> anyhow::Result<()> {
                         HotkeyAction::Cycle           => fan_state.cycle(),
                     };
                     if let Some(change) = change {
-                        // Update mic audio target.
                         fan_audio.set_mic_target(fan_state.active_client_audio_addr());
-
                         let notification = ControlPacket::ActiveClientChange(change);
                         let map = fan_map.lock().unwrap();
                         for tx in map.values() {
@@ -67,18 +74,25 @@ pub async fn run_server(addr: &str, audio: ServerAudio) -> anyhow::Result<()> {
     });
 
     // ── Accept loop ────────────────────────────────────────────────────────
-    info!("Listening on {addr}");
+    info!("Listening on {addr} (TLS)");
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (tcp_stream, peer) = listener.accept().await?;
         info!("New connection from {peer}");
-        stream.set_nodelay(true)?;
+        tcp_stream.set_nodelay(true)?;
 
         let state      = state.clone();
         let client_map = client_map.clone();
         let audio      = Arc::clone(&audio);
+        let tls        = tls.clone();
+        let pairing    = pairing_code.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, peer, state, client_map, audio).await {
+            // TLS handshake.
+            let tls_stream = match tls.acceptor.accept(tcp_stream).await {
+                Ok(s) => s,
+                Err(e) => { warn!("TLS handshake failed from {peer}: {e}"); return; }
+            };
+            if let Err(e) = handle_client(tls_stream, peer, state, client_map, audio, pairing).await {
                 warn!("Client {peer} error: {e}");
             }
             info!("Client {peer} disconnected");
@@ -87,13 +101,14 @@ pub async fn run_server(addr: &str, audio: ServerAudio) -> anyhow::Result<()> {
 }
 
 async fn handle_client(
-    stream: TcpStream,
+    stream: tokio_rustls::server::TlsStream<TcpStream>,
     peer: std::net::SocketAddr,
     state: ActiveClientState,
     client_map: ClientMap,
     audio: Arc<ServerAudio>,
+    pairing_code: String,
 ) -> anyhow::Result<()> {
-    let (reader, writer) = stream.into_split();
+    let (reader, writer) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(reader);
     let mut writer = BufWriter::new(writer);
 
@@ -104,6 +119,7 @@ async fn handle_client(
         other => anyhow::bail!("expected Hello, got {:?}", other),
     };
 
+    // Version check.
     if hello.protocol_version != PROTOCOL_VERSION {
         let resp = ControlPacket::HelloResponse(HelloResponse {
             protocol_version: PROTOCOL_VERSION,
@@ -114,6 +130,25 @@ async fn handle_client(
                 "version mismatch: server={PROTOCOL_VERSION} client={}",
                 hello.protocol_version
             )),
+            pairing_required: false,
+        });
+        write_packet(&mut writer, &resp, 0).await?;
+        return Ok(());
+    }
+
+    // Pairing code check.
+    let code_ok = match &hello.pairing_code {
+        Some(code) => code == &pairing_code,
+        None       => false,
+    };
+    if !code_ok {
+        let resp = ControlPacket::HelloResponse(HelloResponse {
+            protocol_version: PROTOCOL_VERSION,
+            server_name: hostname(),
+            assigned_slot: 0,
+            accepted: false,
+            reject_reason: Some("Incorrect or missing pairing code.".into()),
+            pairing_required: true,
         });
         write_packet(&mut writer, &resp, 0).await?;
         return Ok(());
@@ -122,7 +157,6 @@ async fn handle_client(
     let slot = state.register(hello.client_name.clone(), peer);
     info!("Client '{}' → slot {slot} (peer {peer})", hello.client_name);
 
-    // If this is the first/active client, point mic audio at it.
     if state.active_slot() == slot {
         audio.set_mic_target(state.active_client_audio_addr());
     }
@@ -133,6 +167,7 @@ async fn handle_client(
         assigned_slot: slot,
         accepted: true,
         reject_reason: None,
+        pairing_required: false,
     });
     write_packet(&mut writer, &resp, 0).await?;
 
@@ -166,11 +201,10 @@ async fn handle_client(
     // ── Cleanup ────────────────────────────────────────────────────────────
     client_map.lock().unwrap().remove(&slot);
     state.deregister(slot);
-    // If the removed client was active, point mic at new active (or None).
     audio.set_mic_target(state.active_client_audio_addr());
     writer_task.abort();
 
-    Ok(result?)
+    Ok(result.map_err(anyhow::Error::from)?)
 }
 
 fn hostname() -> String {

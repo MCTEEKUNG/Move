@@ -135,7 +135,11 @@ fn packet_type_of(pkt: &ControlPacket) -> u8 {
 }
 
 /// Convenience: send a Hello from the client side.
-pub async fn send_hello<W>(writer: &mut W, client_name: &str) -> io::Result<()>
+pub async fn send_hello<W>(
+    writer: &mut W,
+    client_name: &str,
+    pairing_code: Option<String>,
+) -> io::Result<()>
 where
     W: AsyncWriteExt + Unpin,
 {
@@ -143,6 +147,7 @@ where
     let pkt = ControlPacket::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: client_name.to_owned(),
+        pairing_code,
     });
     write_packet(writer, &pkt, 0).await
 }

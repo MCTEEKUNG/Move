@@ -13,6 +13,10 @@ serde              = { version = "1", features = ["derive"] }
 bincode            = { version = "2", features = ["serde"] }
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# TLS
+rustls       = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+rcgen        = "0.13"
 
 # Fix audiopus_sys cmake_minimum_required incompatibility with CMake >= 3.31.
 # vendor/audiopus_sys/build.rs adds -DCMAKE_POLICY_VERSION_MINIMUM=3.5.

@@ -1,4 +1,4 @@
-/// Server-side file transfer and clipboard subsystem.
+/// Server-side file transfer and clipboard subsystem (TLS-wrapped).
 ///
 /// TCP :9003 — file transfer (bidirectional)
 /// TCP :9004 — clipboard sync (bidirectional)
@@ -17,6 +17,9 @@ use netshare_core::{
     framing::{read_value, write_value},
 };
 
+use crate::tls::ServerTls;
+use crate::PendingRequests;
+
 /// Default receive folder — files from clients land here.
 pub fn receive_dir() -> PathBuf {
     let base = std::env::var("USERPROFILE")
@@ -26,47 +29,57 @@ pub fn receive_dir() -> PathBuf {
 }
 
 /// Start the file-transfer listener on TCP :9003 and clipboard on TCP :9004.
-pub fn start(send_queue_rx: tokio::sync::mpsc::UnboundedReceiver<PathBuf>) -> Result<()> {
-    // Ensure receive directory exists.
+pub fn start(tls: ServerTls, pending: PendingRequests) -> Result<()> {
     let recv_dir = receive_dir();
     std::fs::create_dir_all(&recv_dir)?;
     info!("Receive folder: {}", recv_dir.display());
 
     // ── File transfer listener (:9003) ─────────────────────────────────────
+    let tls_file = tls.clone();
     let recv_dir_clone = recv_dir.clone();
+    let pending_clone = pending.clone();
     tokio::spawn(async move {
         let listener = match TcpListener::bind("0.0.0.0:9003").await {
             Ok(l) => l,
             Err(e) => { warn!("file listener bind error: {e}"); return; }
         };
-        info!("File transfer listening on TCP :9003");
+        info!("File transfer listening on TCP :9003 (TLS)");
 
         loop {
-            let (stream, peer) = match listener.accept().await {
+            let (tcp, peer) = match listener.accept().await {
                 Ok(v) => v,
                 Err(e) => { warn!("file accept error: {e}"); break; }
             };
-            info!("File channel connected from {peer}");
-            stream.set_nodelay(true).ok();
+            tcp.set_nodelay(true).ok();
 
-            let recv_dir = recv_dir_clone.clone();
+            let tls  = tls_file.clone();
+            let recv_dir  = recv_dir_clone.clone();
+            let pending   = pending_clone.clone();
             tokio::spawn(async move {
-                let (r, w) = stream.into_split();
+                let tls_stream = match tls.acceptor.accept(tcp).await {
+                    Ok(s) => s,
+                    Err(e) => { warn!("file TLS handshake failed from {peer}: {e}"); return; }
+                };
+                info!("File channel connected from {peer} (TLS)");
+
+                let (r, w) = tokio::io::split(tls_stream);
                 let mut reader = BufReader::new(r);
                 let mut writer = BufWriter::new(w);
 
                 loop {
-                    let (pkt_type, pkt): (u8, FilePacket) = match read_value(&mut reader).await {
+                    let (_, pkt): (u8, FilePacket) = match read_value(&mut reader).await {
                         Ok(v) => v,
                         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                         Err(e) => { warn!("file read error: {e}"); break; }
                     };
-
                     match pkt {
                         FilePacket::Request(req) => {
-                            receiver::handle_incoming(&mut reader, &mut writer, req, &recv_dir).await;
+                            receiver::handle_incoming(
+                                &mut reader, &mut writer,
+                                req, &recv_dir, peer, pending.clone(),
+                            ).await;
                         }
-                        other => warn!("unexpected file packet type 0x{pkt_type:02x}: {other:?}"),
+                        other => warn!("unexpected file packet: {other:?}"),
                     }
                 }
             });
@@ -74,7 +87,8 @@ pub fn start(send_queue_rx: tokio::sync::mpsc::UnboundedReceiver<PathBuf>) -> Re
     });
 
     // ── Clipboard listener (:9004) ─────────────────────────────────────────
-    tokio::spawn(clipboard::run_server(recv_dir));
+    let tls_clip = tls.clone();
+    tokio::spawn(clipboard::run_server(recv_dir, tls_clip));
 
     Ok(())
 }

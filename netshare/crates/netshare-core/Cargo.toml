@@ -9,3 +9,5 @@ bincode  = { workspace = true }
 tokio    = { workspace = true }
 tracing  = { workspace = true }
 bitflags = { version = "2", features = ["serde"] }
+rustls   = { workspace = true }
+sha2     = "0.10"

@@ -3,6 +3,14 @@ name    = "netshare-server"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "netshare_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "netshare-server"
+path = "src/main.rs"
+
 [dependencies]
 netshare-core = { path = "../netshare-core" }
 tokio         = { workspace = true }
@@ -10,7 +18,10 @@ serde         = { workspace = true }
 bincode       = { workspace = true }
 tracing       = { workspace = true }
 tracing-subscriber = { workspace = true }
-anyhow = "1"
+anyhow       = "1"
+rustls       = { workspace = true }
+tokio-rustls = { workspace = true }
+rcgen        = { workspace = true }
 cpal       = "0.15"
 opus       = "0.3"
 sha2       = "0.10"

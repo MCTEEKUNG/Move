@@ -17,23 +17,28 @@ use netshare_core::{
     framing::{read_value, write_value},
 };
 
-pub async fn run_server(_recv_dir: PathBuf) {
+pub async fn run_server(_recv_dir: PathBuf, tls: crate::tls::ServerTls) {
     let listener = match TcpListener::bind("0.0.0.0:9004").await {
         Ok(l) => l,
         Err(e) => { warn!("clipboard listener bind error: {e}"); return; }
     };
-    info!("Clipboard sync listening on TCP :9004");
+    info!("Clipboard sync listening on TCP :9004 (TLS)");
 
     loop {
-        let (stream, peer) = match listener.accept().await {
+        let (tcp, peer) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => { warn!("clipboard accept error: {e}"); break; }
         };
-        info!("Clipboard channel connected from {peer}");
-        stream.set_nodelay(true).ok();
+        tcp.set_nodelay(true).ok();
 
+        let tls = tls.clone();
         tokio::spawn(async move {
-            let (r, w) = stream.into_split();
+            let stream = match tls.acceptor.accept(tcp).await {
+                Ok(s) => s,
+                Err(e) => { warn!("clipboard TLS handshake from {peer}: {e}"); return; }
+            };
+            info!("Clipboard channel connected from {peer} (TLS)");
+            let (r, w) = tokio::io::split(stream);
             let mut reader = BufReader::new(r);
             let mut writer = BufWriter::new(w);
 
