@@ -1,25 +1,55 @@
-/// Main egui application.
-use std::path::PathBuf;
+/// Main egui application — Refactored for Automatic Hub Mode.
+use std::sync::{Arc, Mutex};
 use eframe::egui::{self, Color32, RichText, Sense, Stroke};
-use netshare_client::ConnectionStatus;
-use netshare_server::PendingFileRequest;
-
+use netshare_core::layout::{ClientEdge, LayoutConfig};
 use crate::discovery::{MdnsAdvertiser, MdnsBrowser};
 use crate::tray::TrayHandle;
 
-// ── Mode state ─────────────────────────────────────────────────────────────
+// ── Shared Application Log State ─────────────────────────────────────────────
 
-enum Mode {
-    Selecting,
-    Server {
-        handle:    netshare_server::ServerHandle,
-        _mdns:     MdnsAdvertiser,
-        transfers: Vec<TransferEntry>,
-    },
-    Client {
-        handle:    netshare_client::ClientHandle,
-        transfers: Vec<TransferEntry>,
-    },
+#[derive(Clone, Debug)]
+pub struct LogEntry {
+    pub time: String,
+    pub level: String,
+    pub message: String,
+}
+
+#[derive(Default)]
+pub struct AppLogs {
+    pub entries: Vec<LogEntry>,
+}
+
+impl AppLogs {
+    pub fn add(&mut self, level: &str, message: &str) {
+        let time = chrono::Local::now().format("%H:%M:%S").to_string();
+        self.entries.push(LogEntry {
+            time,
+            level: level.to_owned(),
+            message: message.to_owned(),
+        });
+        if self.entries.len() > 1000 {
+            self.entries.remove(0);
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    pub static ref GLOBAL_LOGS: Arc<Mutex<AppLogs>> = Arc::new(Mutex::new(AppLogs::default()));
+}
+
+// ── UI State & Selection ─────────────────────────────────────────────────────
+
+#[derive(PartialEq, Eq)]
+enum ActivePage {
+    Dashboard,
+    Settings,
+    Logs,
+}
+
+#[derive(Default)]
+struct LayoutDragState {
+    dragging_slot: Option<u8>,
+    drag_screen_pos: egui::Pos2,
 }
 
 #[derive(Clone)]
@@ -28,54 +58,84 @@ struct TransferEntry {
     status: String,
 }
 
-// ── App ─────────────────────────────────────────────────────────────────────
+// ── App Handle (Background Services) ──────────────────────────────────────────
+
+struct AppServices {
+    server: Option<netshare_server::ServerHandle>,
+    client: Option<netshare_client::ClientHandle>,
+    _mdns:  Option<MdnsAdvertiser>,
+}
+
+// ── Application ───────────────────────────────────────────────────────────────
 
 pub struct NetShareApp {
-    mode: Mode,
-    // Selection screen inputs.
-    bind_addr:    String,
-    server_addr:  String,
-    client_name:  String,
-    pairing_input: String,   // pairing code typed by the client user
-    start_error:  String,
-    // mDNS browser.
-    browser: Option<MdnsBrowser>,
-    // System tray.
+    services:      AppServices,
+    active_page:   ActivePage,
+    
+    // Config / Form State
+    bind_addr:     String,
+    client_name:   String,
+    pairing_input: String,
+    auto_connect:  bool,
+    
+    // UI Helpers
+    browser:        Option<MdnsBrowser>,
     tray:           Option<TrayHandle>,
     window_visible: bool,
-    // Tokio runtime handle.
-    rt: tokio::runtime::Handle,
+    rt:             tokio::runtime::Handle,
+    layout_drag:    LayoutDragState,
 }
 
 impl NetShareApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Handle) -> Self {
         let browser     = MdnsBrowser::start().ok();
         let tray        = TrayHandle::create().ok();
-        let client_name = std::env::var("COMPUTERNAME")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| "client".to_owned());
-
-        Self {
-            mode: Mode::Selecting,
-            bind_addr:    "0.0.0.0:9000".into(),
-            server_addr:  String::new(),
+        let client_name = gethostname();
+        
+        let mut app = Self {
+            services: AppServices { server: None, client: None, _mdns: None },
+            active_page: ActivePage::Dashboard,
+            bind_addr: "0.0.0.0:9000".into(),
             client_name,
             pairing_input: String::new(),
-            start_error:  String::new(),
+            auto_connect: true,
             browser,
             tray,
             window_visible: true,
             rt,
+            layout_drag: LayoutDragState::default(),
+        };
+
+        // AUTO-START: Start server immediately
+        app.start_server();
+
+        app
+    }
+
+    fn start_server(&mut self) {
+        let _guard = self.rt.enter();
+        match netshare_server::start(&self.bind_addr) {
+            Ok(handle) => {
+                let host_name = gethostname();
+                let port = self.bind_addr.split(':').last()
+                    .and_then(|p| p.parse().ok()).unwrap_or(9000);
+                let mdns = MdnsAdvertiser::start(&host_name, port).ok();
+                
+                self.services.server = Some(handle);
+                self.services._mdns  = mdns;
+                log_info("Local server started automatically.");
+            }
+            Err(e) => log_error(&format!("Auto-server start failed: {e}")),
         }
     }
 }
 
 impl eframe::App for NetShareApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Poll mDNS browser.
+        // Poll background discovery
         if let Some(b) = &mut self.browser { b.poll(); }
 
-        // Poll tray events.
+        // Poll tray
         if let Some(tray) = &self.tray {
             if tray.poll_toggle() {
                 self.window_visible = !self.window_visible;
@@ -86,489 +146,300 @@ impl eframe::App for NetShareApp {
             }
         }
 
-        // Handle dropped files.
-        let dropped: Vec<PathBuf> = ctx.input(|i| {
-            i.raw.dropped_files.iter()
-                .filter_map(|f| f.path.clone())
-                .collect()
-        });
-        for path in dropped {
-            match &mut self.mode {
-                Mode::Server { handle, transfers, .. } => {
-                    let name = file_name(&path);
-                    handle.send_file(path);
-                    transfers.push(TransferEntry { name, status: "Sending…".into() });
-                }
-                Mode::Client { handle, transfers } => {
-                    let name = file_name(&path);
-                    handle.send_file(path);
-                    transfers.push(TransferEntry { name, status: "Sending…".into() });
-                }
-                Mode::Selecting => {}
-            }
-        }
-
-        // Close → minimize to taskbar.
-        if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-        }
-
-        // Update tray tooltip.
-        if let Some(tray) = &self.tray {
-            let tooltip = tray_tooltip(&self.mode);
-            tray.set_tooltip(&tooltip);
-        }
-
-        // ── File-accept dialogs (server) ──────────────────────────────────
-        if let Mode::Server { handle, .. } = &mut self.mode {
-            let mut pending = handle.pending_file_requests.lock().unwrap();
-            let mut i = 0;
-            while i < pending.len() {
-                let req = &pending[i];
-                let title = format!("Incoming file from {}", req.from_peer);
-                let mut open = true;
-                let mut accepted: Option<bool> = None;
-
-                egui::Window::new(&title)
-                    .id(egui::Id::new(("file_accept", req.id)))
-                    .collapsible(false)
-                    .resizable(false)
-                    .open(&mut open)
-                    .show(ctx, |ui| {
-                        ui.label(RichText::new(format!("\"{}\"", req.filename)).strong());
-                        ui.label(format!("Size: {}", format_bytes(req.size)));
-                        ui.add_space(10.0);
-                        ui.horizontal(|ui| {
-                            if ui.button(RichText::new("  Accept  ").color(Color32::from_rgb(0x40, 0xC0, 0x40))).clicked() {
-                                accepted = Some(true);
-                            }
-                            if ui.button(RichText::new("  Reject  ").color(Color32::RED)).clicked() {
-                                accepted = Some(false);
-                            }
-                        });
-                    });
-
-                if let Some(ans) = accepted {
-                    let req = pending.remove(i);
-                    let _ = req.response.send(ans);
-                } else if !open {
-                    let req = pending.remove(i);
-                    let _ = req.response.send(false);
-                } else {
-                    i += 1;
+        // AUTO-CONNECT (Discovery) - Throttled to avoid starving the main thread
+        static LAST_CONNECT_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        
+        if self.auto_connect && self.services.client.is_none() && (now - LAST_CONNECT_ATTEMPT.load(std::sync::atomic::Ordering::Relaxed) > 5) {
+            let local_host = gethostname();
+            if let Some(found) = self.browser.as_ref().and_then(|b| {
+                // Find first server that ISN'T us
+                b.servers.iter().find(|s| !s.name.contains(&local_host))
+            }) {
+                LAST_CONNECT_ATTEMPT.store(now, std::sync::atomic::Ordering::Relaxed);
+                let addr = format!("{}:{}", found.addr, found.port);
+                let _guard = self.rt.enter();
+                if let Ok(handle) = netshare_client::start(&addr, &self.client_name, "") {
+                    self.services.client = Some(handle);
+                    log_info(&format!("Auto-connected to remote server: {}", found.name));
                 }
             }
         }
 
-        // ── Render main panel ────────────────────────────────────────────
+        // Render Glassmorphism UI
+        setup_mica_visuals(ctx);
+
+        egui::SidePanel::left("nav_panel")
+            .resizable(false)
+            .default_width(70.0)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(20.0);
+                    // App Logo (Cyan Circle)
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 12.0, Color32::from_rgb(0, 218, 243));
+                    ui.add_space(40.0);
+
+                    nav_button(ui, "", "Dashboard", &mut self.active_page, ActivePage::Dashboard);
+                    ui.add_space(20.0);
+                    nav_button(ui, "⚙", "Settings", &mut self.active_page, ActivePage::Settings);
+                    ui.add_space(20.0);
+                    nav_button(ui, "", "Logs", &mut self.active_page, ActivePage::Logs);
+                });
+            });
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            match &mut self.mode {
-                Mode::Selecting => render_selecting(
-                    ui,
-                    &mut self.bind_addr,
-                    &mut self.server_addr,
-                    &mut self.client_name,
-                    &mut self.pairing_input,
-                    &mut self.start_error,
-                    &mut self.browser,
-                    &mut self.mode,
-                    &self.rt,
-                ),
-                Mode::Server { handle, transfers, .. } => {
-                    render_server(ui, handle, transfers);
-                }
-                Mode::Client { handle, transfers } => {
-                    render_client(ui, handle, transfers);
-                }
+            match self.active_page {
+                ActivePage::Dashboard => self.render_dashboard(ui),
+                ActivePage::Settings  => self.render_settings(ui),
+                ActivePage::Logs      => self.render_logs(ui),
             }
         });
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        // Request repaint for animations at 30fps (33ms) to save CPU/prevent lag
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }
 }
 
-// ── Selecting screen ────────────────────────────────────────────────────────
+// ── UI Components ─────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
-fn render_selecting(
-    ui: &mut egui::Ui,
-    bind_addr:     &mut String,
-    server_addr:   &mut String,
-    client_name:   &mut String,
-    pairing_input: &mut String,
-    start_error:   &mut String,
-    browser:       &mut Option<MdnsBrowser>,
-    mode:          &mut Mode,
-    rt:            &tokio::runtime::Handle,
-) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(24.0);
-        ui.heading(RichText::new("NetShare").size(28.0).strong());
-        ui.label("Network Device Sharing — choose how to use this machine.");
-        ui.add_space(20.0);
-
-        // ── Server Mode ──────────────────────────────────────────────────
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_min_width(380.0);
-            ui.label(RichText::new("Server Mode").strong().size(16.0));
-            ui.label("Share this PC's mouse and keyboard with clients on your LAN.");
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("Bind address:");
-                ui.text_edit_singleline(bind_addr);
-            });
-            ui.add_space(4.0);
-            if ui.button(RichText::new("  Start Server  ").size(14.0)).clicked() {
-                let _guard = rt.enter();
-                match netshare_server::start(bind_addr) {
-                    Ok(handle) => {
-                        let mdns_host = gethostname();
-                        let port = bind_addr.split(':').last()
-                            .and_then(|p| p.parse().ok()).unwrap_or(9000);
-                        let _mdns = MdnsAdvertiser::start(&mdns_host, port)
-                            .unwrap_or_else(|_| MdnsAdvertiser::dummy());
-                        *start_error = String::new();
-                        *mode = Mode::Server { handle, _mdns, transfers: Vec::new() };
-                    }
-                    Err(e) => *start_error = format!("Server start failed: {e}"),
-                }
-            }
-        });
-
-        ui.add_space(16.0);
-
-        // ── Client Mode ──────────────────────────────────────────────────
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_min_width(380.0);
-            ui.label(RichText::new("Client Mode").strong().size(16.0));
-            ui.label("Receive input from your main PC and share audio/files.");
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("Your name:  ");
-                ui.text_edit_singleline(client_name);
-            });
-            ui.horizontal(|ui| {
-                ui.label("Server addr:");
-                ui.text_edit_singleline(server_addr);
-            });
-            ui.horizontal(|ui| {
-                ui.label("Pairing code:");
-                ui.add(egui::TextEdit::singleline(pairing_input)
-                    .char_limit(8)
-                    .hint_text("e.g. 1A2B3C"));
-            });
-
-            // mDNS discovered servers.
-            if let Some(b) = browser {
-                if !b.servers.is_empty() {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new("Discovered on LAN:").small());
-                    for s in b.servers.clone() {
-                        let label = format!("{} — {}:{}", s.name, s.addr, s.port);
-                        if ui.small_button(&label).clicked() {
-                            *server_addr = format!("{}:{}", s.addr, s.port);
-                        }
-                    }
-                }
-            }
-
-            ui.add_space(4.0);
-            let can_connect = !server_addr.is_empty() && !pairing_input.is_empty();
-            ui.add_enabled_ui(can_connect, |ui| {
-                if ui.button(RichText::new("  Connect  ").size(14.0)).clicked() {
-                    let _guard = rt.enter();
-                    match netshare_client::start(server_addr, client_name, pairing_input) {
-                        Ok(handle) => {
-                            *start_error = String::new();
-                            *mode = Mode::Client { handle, transfers: Vec::new() };
-                        }
-                        Err(e) => *start_error = format!("Client start failed: {e}"),
-                    }
-                }
-            });
-            if !can_connect {
-                ui.label(RichText::new("Enter server address and pairing code to connect.")
-                    .small().color(Color32::GRAY));
-            }
-        });
-
-        if !start_error.is_empty() {
-            ui.add_space(8.0);
-            ui.colored_label(Color32::RED, start_error.as_str());
-        }
-    });
+fn nav_button(ui: &mut egui::Ui, icon: &str, _label: &str, current: &mut ActivePage, target: ActivePage) {
+    let selected = *current == target;
+    let color = if selected { Color32::from_rgb(0, 218, 243) } else { Color32::from_gray(100) };
+    
+    if ui.selectable_label(false, RichText::new(icon).size(24.0).color(color)).clicked() {
+        *current = target;
+    }
 }
 
-// ── Server view ─────────────────────────────────────────────────────────────
-
-fn render_server(
-    ui: &mut egui::Ui,
-    handle: &mut netshare_server::ServerHandle,
-    transfers: &mut Vec<TransferEntry>,
-) {
-    ui.horizontal(|ui| {
-        ui.heading("NetShare — Server");
-        ui.add_space(8.0);
-        ui.colored_label(Color32::from_rgb(0x40, 0xC0, 0x40), "● Running");
-    });
-    ui.separator();
-
-    // ── Pairing code ─────────────────────────────────────────────────────
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label("Pairing code — share this with clients:");
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(&handle.pairing_code)
-                    .monospace()
-                    .size(20.0)
-                    .strong()
-                    .color(Color32::from_rgb(0xFF, 0xCC, 0x00)),
-            );
-        });
-    });
-    ui.add_space(6.0);
-
-    // ── Clients + Controls ────────────────────────────────────────────────
-    let clients = handle.clients();
-    let active  = handle.active_slot();
-
-    ui.columns(2, |cols| {
-        cols[0].label(RichText::new("Connected Clients").strong());
-        if clients.is_empty() {
-            cols[0].label(RichText::new("No clients connected").color(Color32::GRAY));
-        } else {
-            for (slot, name) in &clients {
-                let is_active = *slot == active;
-                cols[0].horizontal(|ui| {
-                    let dot   = if is_active { "●" } else { "○" };
-                    let color = if is_active { Color32::from_rgb(0x40, 0xC0, 0x40) } else { Color32::GRAY };
-                    ui.colored_label(color, dot);
-                    ui.label(format!("[{slot}] {name}"));
-                    if is_active {
-                        ui.label(RichText::new("active").small().color(Color32::from_rgb(0x40, 0xC0, 0x40)));
-                    }
-                });
-            }
-        }
-
-        cols[1].label(RichText::new("Controls").strong());
-        if active == 0 {
-            cols[1].label("No active client");
-        } else {
-            let name = clients.iter().find(|(s, _)| *s == active)
-                .map(|(_, n)| n.as_str()).unwrap_or("?");
-            cols[1].label(format!("Active: {} (slot {})", name, active));
-            cols[1].label(RichText::new("Switch: Ctrl+Shift+Alt+[1-9]  •  Cycle: Scroll Lock")
-                .small().color(Color32::GRAY));
-        }
-
-        cols[1].add_space(8.0);
-        let mut bcast = handle.broadcast_mode();
-        if cols[1].checkbox(&mut bcast, "Broadcast mode").changed() {
-            handle.set_broadcast_mode(bcast);
-        }
-        if bcast {
-            cols[1].horizontal(|ui| {
-                ui.colored_label(Color32::RED, "⚠");
-                ui.colored_label(Color32::RED, "Input sent to ALL clients!");
-            });
-        }
-    });
-
-    ui.separator();
-
-    // ── File drop zone ────────────────────────────────────────────────────
-    let active_name = clients.iter().find(|(s, _)| *s == active).map(|(_, n)| n.clone());
-    ui.label(RichText::new("File Transfers").strong());
-    let label = active_name.as_deref()
-        .map(|n| format!("Drop files here to send to {n}"))
-        .unwrap_or_else(|| "Connect a client to enable file sending".into());
-    drop_zone(ui, &label, active_name.is_some());
-
-    if !transfers.is_empty() {
-        ui.add_space(4.0);
-        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-            for t in transfers.iter() {
-                ui.horizontal(|ui| {
-                    ui.label(&t.name);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(&t.status).small().color(Color32::GRAY));
-                    });
-                });
-            }
-        });
-    }
-
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.label("Receive folder:");
-        ui.label(RichText::new(netshare_server::file::receive_dir().display().to_string())
-            .small().color(Color32::GRAY));
-        if ui.small_button("Open…").clicked() {
-            let _ = open_folder(&netshare_server::file::receive_dir());
-        }
-    });
+fn setup_mica_visuals(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    style.visuals.window_fill = Color32::from_rgba_premultiplied(17, 19, 23, 240);
+    style.visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(26, 28, 32);
+    style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(30, 32, 36);
+    ctx.set_style(style);
 }
 
-// ── Client view ─────────────────────────────────────────────────────────────
+// ── Canvas Drawing Helpers ──
 
-fn render_client(
-    ui: &mut egui::Ui,
-    handle: &mut netshare_client::ClientHandle,
-    transfers: &mut Vec<TransferEntry>,
-) {
-    let state = {
-        let s = handle.state.lock().unwrap();
-        ClientSnapshot {
-            status:        s.status.clone(),
-            server_name:   s.server_name.clone(),
-            assigned_slot: s.assigned_slot,
-            active_slot:   s.active_slot,
-            active_name:   s.active_name.clone(),
-        }
-    };
+const PLACE_GAP: f32 = 12.0;
 
-    ui.horizontal(|ui| {
-        ui.heading("NetShare — Client");
-        ui.add_space(8.0);
-        match &state.status {
-            ConnectionStatus::Connected => {
-                ui.colored_label(Color32::from_rgb(0x40, 0xC0, 0x40), "● Connected");
-            }
-            ConnectionStatus::Connecting => {
-                ui.colored_label(Color32::YELLOW, "○ Connecting…");
-            }
-            ConnectionStatus::Disconnected(r) => {
-                ui.colored_label(Color32::RED, "✕ Disconnected");
-                if !r.is_empty() { ui.label(RichText::new(r.as_str()).small()); }
-            }
-        }
-    });
-    ui.separator();
-
-    ui.horizontal(|ui| { ui.label("Server:"); ui.label(handle.server_addr().to_string()); });
-    if !state.server_name.is_empty() {
-        ui.horizontal(|ui| { ui.label("Server name:"); ui.label(&state.server_name); });
+fn server_monitor_rects(
+    layout: &LayoutConfig,
+    canvas_min: egui::Pos2,
+    target_w: f32,
+    target_h: f32,
+) -> (Vec<(egui::Rect, bool)>, egui::Rect) {
+    if layout.server_monitors.is_empty() {
+        let srv = egui::Rect::from_center_size(
+            canvas_min + egui::vec2(target_w / 2.0, target_h / 2.0),
+            egui::vec2(160.0, 100.0),
+        );
+        return (vec![(srv, true)], srv);
     }
-    if state.assigned_slot > 0 {
-        ui.horizontal(|ui| { ui.label("My slot:"); ui.label(state.assigned_slot.to_string()); });
+    let (vx_min, vy_min, vx_max, vy_max) = layout.server_bounds();
+    let v_w = (vx_max - vx_min).max(1) as f32;
+    let v_h = (vy_max - vy_min).max(1) as f32;
+    let pad = 30.0_f32;
+    let scale = ((target_w - pad*2.0) / v_w).min((target_h - pad*2.0) / v_h);
+    let off_x = canvas_min.x + (target_w - v_w * scale)/2.0;
+    let off_y = canvas_min.y + (target_h - v_h * scale)/2.0;
+    let mut rects = Vec::new();
+    let mut primary = egui::Rect::NOTHING;
+    for m in &layout.server_monitors {
+        let r = egui::Rect::from_min_size(
+            egui::pos2(off_x + (m.x - vx_min) as f32 * scale, off_y + (m.y - vy_min) as f32 * scale),
+            egui::vec2(m.width as f32 * scale, m.height as f32 * scale)
+        );
+        if m.is_primary { primary = r; }
+        rects.push((r, m.is_primary));
     }
-    if state.active_slot > 0 {
-        ui.horizontal(|ui| {
-            ui.label("Active:");
-            if state.active_slot == state.assigned_slot {
-                ui.colored_label(
-                    Color32::from_rgb(0x40, 0xC0, 0x40),
-                    format!("● {} (me — slot {})", state.active_name, state.active_slot),
-                );
+    if primary == egui::Rect::NOTHING {
+        primary = rects.first().map(|(r,_)| *r).unwrap_or(egui::Rect::NOTHING);
+    }
+    (rects, primary)
+}
+
+fn placed_center(edge: ClientEdge, size: egui::Vec2, srv: egui::Rect) -> egui::Pos2 {
+    match edge {
+        ClientEdge::Right => egui::pos2(srv.right() + PLACE_GAP + size.x/2.0, srv.center().y),
+        ClientEdge::Left  => egui::pos2(srv.left()  - PLACE_GAP - size.x/2.0, srv.center().y),
+        ClientEdge::Below => egui::pos2(srv.center().x, srv.bottom() + PLACE_GAP + size.y/2.0),
+        ClientEdge::Above => egui::pos2(srv.center().x, srv.top()    - PLACE_GAP - size.y/2.0),
+    }
+}
+
+impl NetShareApp {
+    fn render_dashboard(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.heading(RichText::new("System Topology").strong().color(Color32::WHITE));
+            ui.label(RichText::new("Visual layout of your workspace").small().color(Color32::GRAY));
+            ui.add_space(20.0);
+
+            if let Some(handle) = &mut self.services.server {
+                let layout  = handle.layout();
+                let clients = handle.clients();
+                let pings   = handle.pings();
+                
+                let (canvas_rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 350.0), Sense::hover());
+                let painter = ui.painter_at(canvas_rect);
+                
+                // Background
+                painter.rect_filled(canvas_rect, 12.0, Color32::from_rgb(20, 22, 26));
+                painter.rect_stroke(canvas_rect, 12.0, Stroke::new(1.0, Color32::from_rgb(40, 42, 48)));
+
+                let (monitors, srv_anchor) = server_monitor_rects(&layout, canvas_rect.min, canvas_rect.width(), canvas_rect.height());
+
+                // Draw Server Monitors
+                let local_host = gethostname();
+                let server_name = handle.server_name(); // We need to add this method to ServerHandle
+                let is_local_server = server_name == local_host; 
+
+                for (rect, primary) in monitors {
+                    let fill = if primary { Color32::from_rgb(0, 40, 80) } else { Color32::from_rgb(20, 25, 30) };
+                    let stroke = if primary { Color32::from_rgb(0, 218, 243) } else { Color32::from_rgb(60, 65, 75) };
+                    painter.rect(rect, 6.0, fill, Stroke::new(2.0, stroke));
+                    
+                    let label = if is_local_server {
+                        if primary { "THIS MACHINE (HOST)".to_string() } else { "MONITOR".to_string() }
+                    } else {
+                        if primary { format!("REMOTE: {}", server_name) } else { "MONITOR".to_string() }
+                    };
+                    
+                    let res_label = format!("{}×{}", rect.width() as i32, rect.height() as i32); // Note: this is scaled px
+                    painter.text(rect.center() - egui::vec2(0.0, 5.0), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(10.0), Color32::from_gray(200));
+                    // Check if rect is big enough for res label
+                    if rect.height() > 30.0 {
+                        painter.text(rect.center() + egui::vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, format!("{}×{}", layout.server_width, layout.server_height), egui::FontId::proportional(8.0), Color32::from_gray(100));
+                    }
+                }
+
+                // Draw Clients
+                for (slot, name) in clients {
+                    if let Some(p) = layout.placements.get(&slot) {
+                        // Calculate proportional size for client box
+                        // Use a base scale relative to the server's primary monitor
+                        let rel_w = (p.client_width as f32 / layout.server_width.max(1) as f32) * 160.0;
+                        let rel_h = (p.client_height as f32 / layout.server_height.max(1) as f32) * 100.0;
+                        
+                        // Clamp size so it doesn't get too small or too huge on canvas
+                        let size = egui::vec2(rel_w.clamp(80.0, 200.0), rel_h.clamp(50.0, 120.0));
+                        
+                        let center = placed_center(p.edge, size, srv_anchor);
+                        let rect = egui::Rect::from_center_size(center, size);
+                        
+                        // Glassmorphic Client Box
+                        painter.rect(rect, 6.0, Color32::from_rgba_premultiplied(0, 180, 200, 30), Stroke::new(1.5, Color32::from_rgb(0, 218, 243)));
+                        
+                        // Real Ping from network handle
+                        let ping = pings.get(&slot).copied().unwrap_or(0);
+                        
+                        painter.text(rect.center() - egui::vec2(0.0, 15.0), egui::Align2::CENTER_CENTER, name, egui::FontId::proportional(12.0), Color32::WHITE);
+                        painter.text(rect.center() + egui::vec2(0.0, 3.0), egui::Align2::CENTER_CENTER, format!("{}×{}", p.client_width, p.client_height), egui::FontId::proportional(9.0), Color32::from_gray(150));
+                        painter.text(rect.center() + egui::vec2(0.0, 20.0), egui::Align2::CENTER_CENTER, format!("{} ms", ping), egui::FontId::proportional(10.0), Color32::from_rgb(0, 218, 243));
+                        
+                        // Connection line
+                        let (p1, p2) = match p.edge {
+                            ClientEdge::Right => (srv_anchor.right_center(), rect.left_center()),
+                            ClientEdge::Left  => (srv_anchor.left_center(), rect.right_center()),
+                            ClientEdge::Below => (srv_anchor.center_bottom(), rect.center_top()),
+                            ClientEdge::Above => (srv_anchor.center_top(), rect.center_bottom()),
+                        };
+                        painter.line_segment([p1, p2], Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 218, 243, 80)));
+                    }
+                }
             } else {
-                ui.label(format!("{} (slot {})", state.active_name, state.active_slot));
-            }
-        });
-    }
-
-    ui.separator();
-    ui.label(RichText::new("File Transfers").strong());
-    drop_zone(ui, "Drop files here to send to server", true);
-
-    if !transfers.is_empty() {
-        ui.add_space(4.0);
-        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-            for t in transfers.iter() {
-                ui.horizontal(|ui| {
-                    ui.label(&t.name);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(&t.status).small().color(Color32::GRAY));
-                    });
+                ui.centered_and_justified(|ui| {
+                    ui.label(RichText::new("Starting Server Subsystems...").color(Color32::GRAY));
                 });
             }
         });
     }
 
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.label("Receive folder:");
-        ui.label(RichText::new(netshare_client::file::receive_dir().display().to_string())
-            .small().color(Color32::GRAY));
-        if ui.small_button("Open…").clicked() {
-            let _ = open_folder(&netshare_client::file::receive_dir());
-        }
-    });
+    fn render_settings(&mut self, ui: &mut egui::Ui) {
+        ui.heading("System Configuration");
+        ui.add_space(20.0);
+        
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.group(|ui| {
+                    ui.set_width(300.0);
+                    ui.label(RichText::new("Local Machine").strong().color(Color32::from_rgb(0, 218, 243)));
+                    ui.add_space(10.0);
+                    ui.label(format!("Hostname: {}", gethostname()));
+                    ui.label(format!("Role: Shared Console"));
+                    ui.label(format!("Address: {}", self.bind_addr));
+                });
+
+                if let Some(handle) = &self.services.server {
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new("Connected Assets").strong().color(Color32::from_rgb(0, 218, 243)));
+                        ui.add_space(10.0);
+                        let clients = handle.clients();
+                        if clients.is_empty() {
+                            ui.label(RichText::new("No remote clients linked").small().color(Color32::GRAY));
+                        } else {
+                            for (slot, name) in clients {
+                                ui.label(format!("[Slot {slot}] {name}"));
+                            }
+                        }
+                    });
+                }
+            });
+
+            ui.add_space(20.0);
+            ui.group(|ui| {
+                ui.label(RichText::new("Behavior").strong());
+                ui.add_space(10.0);
+                ui.checkbox(&mut self.auto_connect, "Discover and Link automatically");
+                ui.checkbox(&mut true, "Universal Clipboard Shared");
+                ui.checkbox(&mut true, "Launch at Startup (Minimized)");
+            });
+
+            ui.add_space(20.0);
+            if ui.button(RichText::new("Restart Core Engine").color(Color32::from_rgb(255, 100, 100))).clicked() {
+                self.start_server();
+            }
+        });
+    }
+
+    fn render_logs(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Live Diagnostics");
+        ui.add_space(10.0);
+
+        egui::Frame::none()
+            .fill(Color32::from_rgb(12, 14, 18))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    .max_height(f32::INFINITY)
+                    .show(ui, |ui| {
+                        let logs = GLOBAL_LOGS.lock().unwrap();
+                        for entry in &logs.entries {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&entry.time).color(Color32::DARK_GRAY).monospace().size(11.0));
+                                let color = match entry.level.as_str() {
+                                    "ERROR" => Color32::from_rgb(255, 80, 80),
+                                    "WARN"  => Color32::from_rgb(255, 200, 50),
+                                    _       => Color32::from_rgb(0, 218, 243),
+                                };
+                                ui.label(RichText::new(format!("[{}]", entry.level)).color(color).monospace().size(11.0));
+                                ui.label(RichText::new(&entry.message).color(Color32::from_rgb(200, 200, 200)).monospace().size(11.0));
+                            });
+                        }
+                });
+            });
+    }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ── Log Helpers ─────────────────────────────────────────────────────────────
 
-fn drop_zone(ui: &mut egui::Ui, label: &str, enabled: bool) {
-    let size = egui::vec2(ui.available_width(), 56.0);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    let bg    = if enabled { Color32::from_gray(50) } else { Color32::from_gray(30) };
-    let fg    = if enabled { Color32::from_gray(160) } else { Color32::from_gray(80) };
-    ui.painter().rect(rect, 4.0, bg, Stroke::new(1.0, Color32::from_gray(80)));
-    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, label,
-        egui::FontId::proportional(13.0), fg);
-}
-
-fn format_bytes(n: u64) -> String {
-    if n < 1024 { format!("{n} B") }
-    else if n < 1024 * 1024 { format!("{:.1} KB", n as f64 / 1024.0) }
-    else if n < 1024 * 1024 * 1024 { format!("{:.1} MB", n as f64 / (1024.0 * 1024.0)) }
-    else { format!("{:.2} GB", n as f64 / (1024.0 * 1024.0 * 1024.0)) }
-}
-
-fn file_name(path: &PathBuf) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
+fn log_info(msg: &str) { GLOBAL_LOGS.lock().unwrap().add("INFO", msg); }
+fn log_error(msg: &str) { GLOBAL_LOGS.lock().unwrap().add("ERROR", msg); }
 
 fn gethostname() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "server".to_owned())
-}
-
-fn open_folder(path: &std::path::Path) -> anyhow::Result<()> {
-    #[cfg(target_os = "windows")]
-    { std::process::Command::new("explorer").arg(path).spawn()?; }
-    #[cfg(target_os = "linux")]
-    { std::process::Command::new("xdg-open").arg(path).spawn()?; }
-    Ok(())
-}
-
-fn tray_tooltip(mode: &Mode) -> String {
-    match mode {
-        Mode::Selecting => "NetShare — mode not selected".into(),
-        Mode::Server { handle, .. } => {
-            let slot    = handle.active_slot();
-            let clients = handle.clients();
-            if slot == 0 {
-                "NetShare Server — no active client".into()
-            } else {
-                let name = clients.iter().find(|(s, _)| *s == slot)
-                    .map(|(_, n)| n.as_str()).unwrap_or("?");
-                format!("NetShare Server — active: {name} (slot {slot})")
-            }
-        }
-        Mode::Client { handle, .. } => {
-            let s = handle.state.lock().unwrap();
-            match &s.status {
-                ConnectionStatus::Connected =>
-                    format!("NetShare Client — connected to '{}'", s.server_name),
-                ConnectionStatus::Connecting =>
-                    "NetShare Client — connecting…".into(),
-                ConnectionStatus::Disconnected(r) =>
-                    format!("NetShare Client — disconnected: {r}"),
-            }
-        }
-    }
-}
-
-struct ClientSnapshot {
-    status:        ConnectionStatus,
-    server_name:   String,
-    assigned_slot: u8,
-    active_slot:   u8,
-    active_name:   String,
+        .unwrap_or_else(|_| "netshare-node".to_owned())
 }

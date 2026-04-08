@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-serde    = { workspace = true }
-bincode  = { workspace = true }
-tokio    = { workspace = true }
-tracing  = { workspace = true }
-bitflags = { version = "2", features = ["serde"] }
-rustls   = { workspace = true }
-sha2     = "0.10"
+serde      = { workspace = true }
+serde_json = "1"
+bincode    = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
+bitflags   = { version = "2", features = ["serde"] }
+rustls     = { workspace = true }
+sha2       = "0.10"

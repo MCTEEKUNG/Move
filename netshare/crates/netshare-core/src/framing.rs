@@ -130,6 +130,8 @@ fn packet_type_of(pkt: &ControlPacket) -> u8 {
         ControlPacket::AudioConfig(_)        => PKT_AUDIO_CONFIG,
         ControlPacket::Heartbeat             => PKT_HEARTBEAT,
         ControlPacket::ActiveClientChange(_) => PKT_ACTIVE_CLIENT_CHANGE,
+        ControlPacket::CursorEnter { .. }    => PKT_CURSOR_ENTER,
+        ControlPacket::CursorReturn          => PKT_CURSOR_RETURN,
         ControlPacket::Disconnect            => PKT_DISCONNECT,
     }
 }
@@ -139,6 +141,8 @@ pub async fn send_hello<W>(
     writer: &mut W,
     client_name: &str,
     pairing_code: Option<String>,
+    screen_width: i32,
+    screen_height: i32,
 ) -> io::Result<()>
 where
     W: AsyncWriteExt + Unpin,
@@ -148,6 +152,8 @@ where
         protocol_version: PROTOCOL_VERSION,
         client_name: client_name.to_owned(),
         pairing_code,
+        screen_width,
+        screen_height,
     });
     write_packet(writer, &pkt, 0).await
 }

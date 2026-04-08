@@ -25,11 +25,16 @@ pub struct ServerAudio {
 
 impl ServerAudio {
     /// Start both audio streams. Non-blocking — spawns background threads/tasks.
+    /// If audio hardware is unavailable, returns a no-op instance (server still works).
     pub fn start() -> Result<Self> {
         let mic_target: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
 
-        mic_capture::start(Arc::clone(&mic_target))?;
-        audio_sink::start(9001)?;
+        if let Err(e) = mic_capture::start(Arc::clone(&mic_target)) {
+            tracing::warn!("Mic capture disabled: {e}");
+        }
+        if let Err(e) = audio_sink::start(9001) {
+            tracing::warn!("Audio sink disabled: {e}");
+        }
 
         Ok(Self { mic_target })
     }

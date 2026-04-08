@@ -31,5 +31,6 @@ walkdir    = "2"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",    # SendInput, INPUT, MOUSEINPUT, KEYBDINPUT
-    "Win32_Foundation",                   # BOOL
+    "Win32_UI_WindowsAndMessaging",       # SetCursorPos, GetSystemMetrics, GetCursorPos
+    "Win32_Foundation",                   # BOOL, POINT
 ] }

@@ -1,8 +1,8 @@
-/// Mic capture: CPAL input → Opus encode → UDP → active client.
+/// Audio capture: CPAL loopback (speaker) → Opus encode → UDP → active client.
 ///
 /// Architecture
 /// ┌─────────────────────────┐
-/// │  CPAL mic callback      │  (OS audio thread)
+/// │  CPAL loopback callback  │  (OS audio thread)
 /// │  accumulate → 960 f32   │
 /// └────────┬────────────────┘
 ///          │ std::sync::mpsc
@@ -32,12 +32,17 @@ pub fn start(mic_target: Arc<Mutex<Option<SocketAddr>>>) -> Result<()> {
 
     // ── CPAL mic capture thread ────────────────────────────────────────────
     std::thread::spawn(move || {
+        // Catch any CPAL panic so it doesn't kill the whole process.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let host   = cpal::default_host();
-        let device = match host.default_input_device() {
+        
+        // Find the default output device for loopback capture.
+        // On Windows, WASAPI allows capturing the output of a device.
+        let device = match host.default_output_device() {
             Some(d) => d,
-            None    => { warn!("no input device — mic capture disabled"); return; }
+            None    => { warn!("no output device — system audio capture disabled"); return; }
         };
-        info!("Mic device: {}", device.name().unwrap_or_default());
+        info!("System audio capture device: {}", device.name().unwrap_or_default());
 
         let config = cpal::StreamConfig {
             channels:    CHANNELS,
@@ -68,6 +73,10 @@ pub fn start(mic_target: Arc<Mutex<Option<SocketAddr>>>) -> Result<()> {
                 loop { std::thread::park(); }
             }
             Err(e) => warn!("failed to open mic stream: {e}"),
+        }
+        })); // end catch_unwind closure
+        if let Err(_) = result {
+            warn!("Mic capture thread panicked — mic disabled");
         }
     });
 

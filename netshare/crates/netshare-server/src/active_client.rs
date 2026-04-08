@@ -8,6 +8,8 @@ struct ClientInfo {
     name: String,
     /// TCP peer address — same IP used for UDP audio (port differs).
     peer: SocketAddr,
+    /// Last measured round-trip time in milliseconds.
+    last_ping_ms: u64,
 }
 
 #[derive(Debug)]
@@ -39,7 +41,7 @@ impl ActiveClientState {
         let mut g = self.0.lock().unwrap();
         let slot = g.next_slot;
         g.next_slot = (slot % 9) + 1;
-        g.clients.push(ClientInfo { slot, name, peer });
+        g.clients.push(ClientInfo { slot, name, peer, last_ping_ms: 0 });
         // First client becomes active automatically.
         if g.active_slot == 0 {
             g.active_slot = slot;
@@ -107,11 +109,31 @@ impl ActiveClientState {
         g.clients.iter().map(|c| (c.slot, c.name.clone())).collect()
     }
 
+    /// Snapshot of all client pings: `(slot, ping_ms)`.
+    pub fn pings_snapshot(&self) -> std::collections::HashMap<u8, u64> {
+        let g = self.0.lock().unwrap();
+        g.clients.iter().map(|c| (c.slot, c.last_ping_ms)).collect()
+    }
+
+    /// Update the ping value for a specific slot.
+    pub fn update_ping(&self, slot: u8, ping_ms: u64) {
+        let mut g = self.0.lock().unwrap();
+        if let Some(c) = g.clients.iter_mut().find(|c| c.slot == slot) {
+            c.last_ping_ms = ping_ms;
+        }
+    }
+
     pub fn broadcast_mode(&self) -> bool {
         self.0.lock().unwrap().broadcast_mode
     }
 
     pub fn set_broadcast_mode(&self, val: bool) {
         self.0.lock().unwrap().broadcast_mode = val;
+    }
+
+    /// Force-set active slot without validation (used for seamless cursor events).
+    /// slot=0 means server is active.
+    pub fn force_active(&self, slot: u8) {
+        self.0.lock().unwrap().active_slot = slot;
     }
 }

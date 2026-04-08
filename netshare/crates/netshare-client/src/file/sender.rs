@@ -24,20 +24,28 @@ use walkdir::WalkDir;
 
 use netshare_core::{
     file_transfer::{
-        FileCancel, FileChunk, FileComplete, FilePacket, FileRequest,
-        CHUNK_SIZE, PKT_FILE_CANCEL, PKT_FILE_CHUNK, PKT_FILE_COMPLETE, PKT_FILE_REQUEST,
+        FileChunk, FileComplete, FilePacket, FileRequest,
+        CHUNK_SIZE, PKT_FILE_CHUNK, PKT_FILE_COMPLETE, PKT_FILE_REQUEST,
     },
     framing::{read_value, write_value},
+    tls::{make_client_config, SERVER_NAME},
 };
+use tokio_rustls::TlsConnector;
+use rustls::pki_types::ServerName;
 
 static TRANSFER_ID: AtomicU32 = AtomicU32::new(1000); // different range from server
 
 fn next_id() -> u32 { TRANSFER_ID.fetch_add(1, Ordering::Relaxed) }
 
 async fn netshare_server_send(addr: SocketAddr, path: PathBuf) -> Result<()> {
-    let stream = TcpStream::connect(addr).await?;
-    stream.set_nodelay(true)?;
-    let (r, w) = stream.into_split();
+    let tcp = TcpStream::connect(addr).await?;
+    tcp.set_nodelay(true)?;
+    let connector = TlsConnector::from(std::sync::Arc::new(make_client_config()));
+    let server_name = ServerName::try_from(SERVER_NAME)
+        .map_err(|e| anyhow::anyhow!("bad server name: {e}"))?.to_owned();
+    let stream = connector.connect(server_name, tcp).await
+        .map_err(|e| anyhow::anyhow!("TLS handshake for file send failed: {e}"))?;
+    let (r, w) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(r);
     let mut writer = BufWriter::new(w);
 

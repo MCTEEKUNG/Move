@@ -25,15 +25,52 @@ impl ClientHandle {
     }
 }
 
+/// Open Windows Firewall for inbound audio (UDP :9002) on the client machine.
+/// Requires Administrator; silently skips if not elevated.
+#[cfg(target_os = "windows")]
+fn open_client_firewall_ports() {
+    let rules: &[(&str, &str, &str)] = &[
+        ("NetShare-Client-UDP", "UDP", "9002"),       // server mic → client speaker
+        ("NetShare-Client-TCP", "TCP", "9003,9004"),  // file receive + clipboard
+    ];
+    for (name, proto, ports) in rules {
+        let _ = std::process::Command::new("netsh")
+            .args(["advfirewall", "firewall", "delete", "rule",
+                   &format!("name={name}")])
+            .output();
+        let result = std::process::Command::new("netsh")
+            .args(["advfirewall", "firewall", "add", "rule",
+                   &format!("name={name}"),
+                   "dir=in", "action=allow",
+                   &format!("protocol={proto}"),
+                   &format!("localport={ports}")])
+            .output();
+        match result {
+            Ok(o) if o.status.success() =>
+                tracing::info!("Client firewall rule added: {name} ({proto} {ports})"),
+            _ =>
+                tracing::warn!("Could not add client firewall rule {name} — run as Administrator once"),
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_client_firewall_ports() {}
+
 /// Start all client subsystems and return a handle.
 /// Spawns async tasks on the current tokio runtime.
 pub fn start(server_addr_str: &str, client_name: &str, pairing_code: &str) -> anyhow::Result<ClientHandle> {
+    // Open firewall ports on client machine (needed for receiving server mic audio UDP :9002).
+    open_client_firewall_ports();
+
     let server_tcp: SocketAddr = server_addr_str.parse()
         .map_err(|e| anyhow::anyhow!("invalid server address '{server_addr_str}': {e}"))?;
 
-    // Audio.
+    // Audio (optional — if unavailable, client still works for input/file sharing).
     audio::log_available_devices();
-    audio::ClientAudio::start(server_tcp)?;
+    if let Err(e) = audio::ClientAudio::start(server_tcp) {
+        tracing::warn!("Client audio unavailable (audio disabled): {e}");
+    }
 
     // File transfer listener (client receives files from server on :9003).
     file::start(server_tcp)?;

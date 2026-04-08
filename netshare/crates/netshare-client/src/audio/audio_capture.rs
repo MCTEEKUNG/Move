@@ -14,6 +14,7 @@ pub fn start(device: cpal::Device, server_addr: SocketAddr) -> Result<()> {
 
     // ── CPAL capture thread ────────────────────────────────────────────────
     std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         info!("Audio capture device: {}", device.name().unwrap_or_default());
 
         let config = cpal::StreamConfig {
@@ -41,6 +42,8 @@ pub fn start(device: cpal::Device, server_addr: SocketAddr) -> Result<()> {
             Ok(s) => { s.play().ok(); loop { std::thread::park(); } }
             Err(e) => warn!("failed to open audio capture stream: {e}"),
         }
+        })); // end catch_unwind
+        if result.is_err() { warn!("Audio capture thread panicked — mic capture disabled"); }
     });
 
     // ── Bridge thread ──────────────────────────────────────────────────────

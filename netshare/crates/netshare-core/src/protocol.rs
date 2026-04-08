@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use crate::input::{KeyEvent, MouseClick, MouseMove, MouseScroll};
 use crate::audio::AudioConfig;
+use crate::layout::ClientEdge;
 
 // ── Packet type constants ──────────────────────────────────────────────────
 pub const PKT_HELLO:                u8 = 0x01;
@@ -12,6 +13,8 @@ pub const PKT_SCROLL:               u8 = 0x05;
 pub const PKT_AUDIO_CONFIG:         u8 = 0x10;
 pub const PKT_HEARTBEAT:            u8 = 0x11;
 pub const PKT_ACTIVE_CLIENT_CHANGE: u8 = 0x12;
+pub const PKT_CURSOR_ENTER:         u8 = 0x20;
+pub const PKT_CURSOR_RETURN:        u8 = 0x21;
 pub const PKT_DISCONNECT:           u8 = 0xFF;
 
 // ── Flags byte bitmask ─────────────────────────────────────────────────────
@@ -73,6 +76,10 @@ pub enum ControlPacket {
     AudioConfig(AudioConfig),
     Heartbeat,
     ActiveClientChange(ActiveClientChange),
+    /// Server → client: place cursor at this position and enter seamless mode.
+    CursorEnter { x: i32, y: i32, return_edge: ClientEdge },
+    /// Client → server: cursor exited back toward server.
+    CursorReturn,
     Disconnect,
 }
 
@@ -86,6 +93,8 @@ pub struct Hello {
     /// Pairing code entered by the user.  Required when the server has
     /// pairing enabled (`HelloResponse::pairing_required == true`).
     pub pairing_code: Option<String>,
+    pub screen_width: i32,
+    pub screen_height: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,4 +121,4 @@ pub struct ActiveClientChange {
 }
 
 // ── Protocol version ───────────────────────────────────────────────────────
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;

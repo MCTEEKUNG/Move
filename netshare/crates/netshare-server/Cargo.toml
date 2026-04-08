@@ -34,4 +34,6 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",       # SetWindowsHookEx, WH_MOUSE_LL, WH_KEYBOARD_LL
     "Win32_UI_Input_KeyboardAndMouse",    # KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT
     "Win32_Foundation",                   # WPARAM, LPARAM, LRESULT, HWND, BOOL
+    "Win32_Graphics_Gdi",                 # EnumDisplayMonitors, GetMonitorInfo, MONITORINFOEXW
+    "Win32_System_Threading",             # SetThreadPriority, SetPriorityClass
 ] }

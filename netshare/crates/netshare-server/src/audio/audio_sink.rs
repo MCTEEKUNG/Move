@@ -28,6 +28,7 @@ pub fn start(listen_port: u16) -> Result<()> {
 
     // ── CPAL speaker output thread ─────────────────────────────────────────
     std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let host   = cpal::default_host();
         let device = match host.default_output_device() {
             Some(d) => d,
@@ -82,6 +83,10 @@ pub fn start(listen_port: u16) -> Result<()> {
                 loop { std::thread::park(); }
             }
             Err(e) => warn!("failed to open speaker stream: {e}"),
+        }
+        })); // end catch_unwind closure
+        if let Err(_) = result {
+            warn!("Speaker thread panicked — audio sink disabled");
         }
     });
 

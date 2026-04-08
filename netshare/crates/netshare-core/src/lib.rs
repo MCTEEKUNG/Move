@@ -2,6 +2,7 @@ pub mod protocol;
 pub mod input;
 pub mod audio;
 pub mod framing;
+pub mod layout;
 pub mod playout;
 pub mod file_transfer;
 pub mod tls;

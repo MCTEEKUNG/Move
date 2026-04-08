@@ -1,8 +1,8 @@
 /// Client-side audio subsystem.
 ///
 /// Two independent streams:
-///   • Audio capture  — CPAL input (VB-Cable or default) → Opus → UDP :9001 → server
-///   • Virtual mic    — UDP :9002 ← server → Opus decode → CPAL output (VB-Cable or default)
+///   • Audio capture  — CPAL output (System Loopback) → Opus → UDP :9001 → server
+///   • System Audio   — UDP :9002 ← server → Opus decode → CPAL output
 pub mod audio_capture;
 pub mod virtual_mic;
 
@@ -18,30 +18,39 @@ pub const FRAME_INTERLEAVED: usize = 480 * 2; // 960 f32
 pub struct ClientAudio;
 
 impl ClientAudio {
+    /// Start audio subsystems. Returns Ok even if audio is unavailable —
+    /// individual failures are logged as warnings and skipped gracefully.
     pub fn start(server_addr: SocketAddr) -> Result<Self> {
-        let (input_device, output_device) = find_audio_devices();
+        let host = cpal::default_host();
 
-        audio_capture::start(input_device, server_addr)?;
-        virtual_mic::start(output_device, 9002)?;
+        // Audio device capture (send this machine's sound to server).
+        // On Windows, we prefer the default output for loopback capture.
+        let capture_device = find_vbcable_input(&host)
+            .or_else(|| host.default_output_device());
+            
+        match capture_device {
+            Some(dev) => {
+                if let Err(e) = audio_capture::start(dev, server_addr) {
+                    tracing::warn!("System audio capture disabled: {e}");
+                }
+            }
+            None => tracing::warn!("No output device found — system audio capture disabled"),
+        }
+
+        // Playback device (received sound from server → this machine's speaker).
+        let playback_device = find_vbcable_output(&host)
+            .or_else(|| host.default_output_device());
+        match playback_device {
+            Some(dev) => {
+                if let Err(e) = virtual_mic::start(dev, 9002) {
+                    tracing::warn!("Remote audio playback disabled: {e}");
+                }
+            }
+            None => tracing::warn!("No output device — remote audio playback disabled"),
+        }
 
         Ok(Self)
     }
-}
-
-/// On Windows, prefer a VB-Cable device for both directions.
-/// Falls back to the system default if VB-Cable is not installed.
-fn find_audio_devices() -> (cpal::Device, cpal::Device) {
-    let host = cpal::default_host();
-
-    let input = find_vbcable_input(&host)
-        .or_else(|| host.default_input_device())
-        .expect("no audio input device");
-
-    let output = find_vbcable_output(&host)
-        .or_else(|| host.default_output_device())
-        .expect("no audio output device");
-
-    (input, output)
 }
 
 fn find_vbcable_input(host: &cpal::Host) -> Option<cpal::Device> {

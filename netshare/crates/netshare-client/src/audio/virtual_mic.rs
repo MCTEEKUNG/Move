@@ -15,6 +15,7 @@ pub fn start(device: cpal::Device, listen_port: u16) -> Result<()> {
 
     // ── CPAL output thread ─────────────────────────────────────────────────
     std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         info!("Virtual mic output device: {}", device.name().unwrap_or_default());
 
         let config = cpal::StreamConfig {
@@ -60,6 +61,8 @@ pub fn start(device: cpal::Device, listen_port: u16) -> Result<()> {
             Ok(s) => { s.play().ok(); loop { std::thread::park(); } }
             Err(e) => warn!("failed to open virtual mic output stream: {e}"),
         }
+        })); // end catch_unwind
+        if result.is_err() { warn!("Virtual mic thread panicked — audio output disabled"); }
     });
 
     // ── Tokio UDP receive + Opus decode task ───────────────────────────────
