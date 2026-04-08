@@ -10,11 +10,18 @@ struct ClientInfo {
     peer: SocketAddr,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Inner {
     active_slot: u8,
     clients: Vec<ClientInfo>,
     next_slot: u8,
+    broadcast_mode: bool,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self { active_slot: 0, clients: Vec::new(), next_slot: 1, broadcast_mode: false }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -22,11 +29,7 @@ pub struct ActiveClientState(Arc<Mutex<Inner>>);
 
 impl Default for ActiveClientState {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(Inner {
-            active_slot: 0,
-            clients: Vec::new(),
-            next_slot: 1,
-        })))
+        Self(Arc::new(Mutex::new(Inner::default())))
     }
 }
 
@@ -87,5 +90,28 @@ impl ActiveClientState {
             .iter()
             .find(|c| c.slot == g.active_slot)
             .map(|c| SocketAddr::new(c.peer.ip(), 9002))
+    }
+
+    /// Returns the IP of the currently active client — used for file sends.
+    pub fn active_client_ip(&self) -> Option<std::net::IpAddr> {
+        let g = self.0.lock().unwrap();
+        g.clients
+            .iter()
+            .find(|c| c.slot == g.active_slot)
+            .map(|c| c.peer.ip())
+    }
+
+    /// Snapshot of connected clients for GUI display: `(slot, name)`.
+    pub fn clients_snapshot(&self) -> Vec<(u8, String)> {
+        let g = self.0.lock().unwrap();
+        g.clients.iter().map(|c| (c.slot, c.name.clone())).collect()
+    }
+
+    pub fn broadcast_mode(&self) -> bool {
+        self.0.lock().unwrap().broadcast_mode
+    }
+
+    pub fn set_broadcast_mode(&self, val: bool) {
+        self.0.lock().unwrap().broadcast_mode = val;
     }
 }

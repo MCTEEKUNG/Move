@@ -3,6 +3,14 @@ name    = "netshare-client"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "netshare_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "netshare-client"
+path = "src/main.rs"
+
 [dependencies]
 netshare-core = { path = "../netshare-core" }
 tokio         = { workspace = true }

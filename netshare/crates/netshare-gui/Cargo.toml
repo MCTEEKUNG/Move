@@ -3,10 +3,26 @@ name    = "netshare-gui"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "netshare-gui"
+path = "src/main.rs"
+
 [dependencies]
-netshare-core      = { path = "../netshare-core" }
+netshare-core   = { path = "../netshare-core" }
+netshare-server = { path = "../netshare-server" }
+netshare-client = { path = "../netshare-client" }
 tokio              = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
-egui               = "0.28"
-eframe             = "0.28"
+anyhow  = "1"
+egui    = "0.28"
+eframe  = { version = "0.28", features = ["persistence"] }
+tray-icon = "0.14"
+mdns-sd   = "0.11"
+rfd       = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

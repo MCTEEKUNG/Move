@@ -19,9 +19,8 @@ use crate::input_capture::{self, CaptureEvent, HotkeyAction};
 type ClientTx  = mpsc::UnboundedSender<ControlPacket>;
 type ClientMap = Arc<Mutex<HashMap<u8, ClientTx>>>;
 
-pub async fn run_server(addr: &str, audio: ServerAudio) -> anyhow::Result<()> {
+pub async fn run_server(addr: &str, audio: ServerAudio, state: ActiveClientState) -> anyhow::Result<()> {
     let listener   = TcpListener::bind(addr).await?;
-    let state      = ActiveClientState::default();
     let client_map: ClientMap = Arc::new(Mutex::new(HashMap::new()));
     let audio      = Arc::new(audio);
 
@@ -42,7 +41,10 @@ pub async fn run_server(addr: &str, audio: ServerAudio) -> anyhow::Result<()> {
                 CaptureEvent::InputPacket(pkt) => {
                     let active = fan_state.active_slot();
                     if active == 0 { continue; }
-                    if let Some(tx) = fan_map.lock().unwrap().get(&active) {
+                    let map = fan_map.lock().unwrap();
+                    if fan_state.broadcast_mode() {
+                        for tx in map.values() { let _ = tx.send(pkt.clone()); }
+                    } else if let Some(tx) = map.get(&active) {
                         let _ = tx.send(pkt);
                     }
                 }

@@ -1,4 +1,36 @@
-// GUI shell — Phase 4. Currently a placeholder.
-fn main() {
-    println!("NetShare GUI — Phase 4 (not yet implemented)");
+mod app;
+mod discovery;
+mod tray;
+
+use tracing_subscriber::EnvFilter;
+
+fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("netshare=debug".parse()?))
+        .init();
+
+    // Start a multi-thread tokio runtime; eframe occupies the main thread.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    let handle = rt.handle().clone();
+
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("NetShare")
+            .with_inner_size([480.0, 520.0])
+            .with_min_inner_size([380.0, 400.0])
+            .with_drag_and_drop(true),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "NetShare",
+        native_options,
+        Box::new(move |cc| Ok(Box::new(app::NetShareApp::new(cc, handle)))),
+    )
+    .map_err(|e| anyhow::anyhow!("eframe error: {e}"))?;
+
+    Ok(())
 }
