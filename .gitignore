@@ -1,0 +1,15 @@
+# Rust build output
+/target
+netshare/target
+
+# Editor / IDE
+.vscode/
+.idea/
+*.iml
+
+# Claude Code memory (local only)
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

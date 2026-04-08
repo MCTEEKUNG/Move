@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "crates/netshare-core",
+    "crates/netshare-server",
+    "crates/netshare-client",
+    "crates/netshare-gui",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio              = { version = "1", features = ["full"] }
+serde              = { version = "1", features = ["derive"] }
+bincode            = { version = "2", features = ["serde"] }
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Fix audiopus_sys cmake_minimum_required incompatibility with CMake >= 3.31.
+# vendor/audiopus_sys/build.rs adds -DCMAKE_POLICY_VERSION_MINIMUM=3.5.
+[patch.crates-io]
+audiopus_sys = { path = "vendor/audiopus_sys" }

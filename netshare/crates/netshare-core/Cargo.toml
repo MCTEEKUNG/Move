@@ -1,0 +1,11 @@
+[package]
+name    = "netshare-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde    = { workspace = true }
+bincode  = { workspace = true }
+tokio    = { workspace = true }
+tracing  = { workspace = true }
+bitflags = { version = "2", features = ["serde"] }
