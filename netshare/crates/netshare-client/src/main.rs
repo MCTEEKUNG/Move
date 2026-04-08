@@ -17,7 +17,8 @@ async fn main() -> anyhow::Result<()> {
 
     info!("NetShare Client → {server_addr_str} as '{client_name}'");
 
-    let _handle = netshare_client::start(&server_addr_str, &client_name)?;
+    let pairing_code = std::env::args().nth(2).unwrap_or_default();
+    let _handle = netshare_client::start(&server_addr_str, &client_name, &pairing_code)?;
     info!("All subsystems started — press Ctrl+C to stop");
 
     tokio::signal::ctrl_c().await?;

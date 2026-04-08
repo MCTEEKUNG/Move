@@ -18,7 +18,10 @@ serde         = { workspace = true }
 bincode       = { workspace = true }
 tracing       = { workspace = true }
 tracing-subscriber = { workspace = true }
-anyhow = "1"
+anyhow       = "1"
+rustls       = { workspace = true }
+tokio-rustls = { workspace = true }
+rcgen        = { workspace = true }
 cpal       = "0.15"
 opus       = "0.3"
 sha2       = "0.10"

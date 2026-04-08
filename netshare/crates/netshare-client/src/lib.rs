@@ -27,7 +27,7 @@ impl ClientHandle {
 
 /// Start all client subsystems and return a handle.
 /// Spawns async tasks on the current tokio runtime.
-pub fn start(server_addr_str: &str, client_name: &str) -> anyhow::Result<ClientHandle> {
+pub fn start(server_addr_str: &str, client_name: &str, pairing_code: &str) -> anyhow::Result<ClientHandle> {
     let server_tcp: SocketAddr = server_addr_str.parse()
         .map_err(|e| anyhow::anyhow!("invalid server address '{server_addr_str}': {e}"))?;
 
@@ -56,8 +56,9 @@ pub fn start(server_addr_str: &str, client_name: &str) -> anyhow::Result<ClientH
     let gui_for_net = gui_state.clone();
     let addr_str = server_addr_str.to_owned();
     let name = client_name.to_owned();
+    let code = if pairing_code.is_empty() { None } else { Some(pairing_code.to_owned()) };
     tokio::spawn(async move {
-        if let Err(e) = network::run_client(&addr_str, &name, gui_for_net).await {
+        if let Err(e) = network::run_client(&addr_str, &name, code, gui_for_net).await {
             tracing::error!("Client network error: {e}");
         }
     });

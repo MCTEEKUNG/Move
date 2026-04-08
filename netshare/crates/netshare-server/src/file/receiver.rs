@@ -25,15 +25,51 @@ use netshare_core::{
     framing::{read_value, write_value},
 };
 
+use crate::{PendingFileRequest, PendingRequests};
+
 pub async fn handle_incoming<R, W>(
     reader: &mut R,
     writer: &mut W,
     req: FileRequest,
     recv_dir: &Path,
+    peer: std::net::SocketAddr,
+    pending: PendingRequests,
 ) where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
+    // ── File-accept prompt ─────────────────────────────────────────────────
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    {
+        let mut list = pending.lock().unwrap();
+        list.push(PendingFileRequest {
+            id:        req.transfer_id,
+            filename:  req.relative_path.clone(),
+            size:      req.total_size,
+            from_peer: peer.ip().to_string(),
+            response:  tx,
+        });
+    }
+
+    // Wait up to 60 s for user to respond; default → reject.
+    let accepted = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        rx,
+    )
+    .await
+    .unwrap_or(Ok(false))
+    .unwrap_or(false);
+
+    if !accepted {
+        let _ = write_value(writer, PKT_FILE_RESPONSE, &FileResponse {
+            transfer_id: req.transfer_id,
+            accepted: false,
+            resume_from: None,
+            reason: Some("User rejected the transfer.".into()),
+        }).await;
+        return;
+    }
+
     if let Err(e) = receive_file(reader, writer, req, recv_dir).await {
         warn!("file receive error: {e}");
     }

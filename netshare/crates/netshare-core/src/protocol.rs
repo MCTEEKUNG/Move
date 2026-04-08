@@ -83,6 +83,9 @@ pub struct Hello {
     /// Protocol version — must match server's expected version.
     pub protocol_version: u16,
     pub client_name: String,
+    /// Pairing code entered by the user.  Required when the server has
+    /// pairing enabled (`HelloResponse::pairing_required == true`).
+    pub pairing_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +97,9 @@ pub struct HelloResponse {
     pub accepted: bool,
     /// Human-readable rejection reason when `accepted == false`.
     pub reject_reason: Option<String>,
+    /// Whether a pairing code is required.  Clients should prompt the user
+    /// and re-connect with `Hello::pairing_code` set when `true`.
+    pub pairing_required: bool,
 }
 
 // ── Active client notification ─────────────────────────────────────────────

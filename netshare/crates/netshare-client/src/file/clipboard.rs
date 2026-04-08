@@ -15,20 +15,27 @@ use netshare_core::{
     file_transfer::{ClipboardImage, ClipboardPacket, ClipboardText, CLIP_IMAGE_MAX_BYTES,
                     PKT_CLIP_IMAGE, PKT_CLIP_TEXT},
     framing::{read_value, write_value},
+    tls::{make_client_config, SERVER_NAME},
 };
 
 pub async fn run_client(server_addr: SocketAddr) {
-    // Retry until server clipboard port is ready.
-    let stream = loop {
+    let tcp = loop {
         match TcpStream::connect(server_addr).await {
             Ok(s) => break s,
             Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
         }
     };
-    stream.set_nodelay(true).ok();
-    info!("Clipboard channel connected to {server_addr}");
+    tcp.set_nodelay(true).ok();
 
-    let (r, w) = stream.into_split();
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(make_client_config()));
+    let server_name = rustls::pki_types::ServerName::try_from(SERVER_NAME).unwrap().to_owned();
+    let stream = match connector.connect(server_name, tcp).await {
+        Ok(s) => s,
+        Err(e) => { warn!("clipboard TLS handshake failed: {e}"); return; }
+    };
+    info!("Clipboard channel connected to {server_addr} (TLS)");
+
+    let (r, w) = tokio::io::split(stream);
     let reader = BufReader::new(r);
     let writer = BufWriter::new(w);
 

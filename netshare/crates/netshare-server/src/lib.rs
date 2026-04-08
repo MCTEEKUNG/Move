@@ -3,19 +3,36 @@ pub mod audio;
 pub mod file;
 pub mod input_capture;
 pub mod network;
+pub mod tls;
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use active_client::ActiveClientState;
 use audio::ServerAudio;
+pub use tls::ServerTls;
+
+/// A pending file-transfer accept request from the GUI's perspective.
+pub struct PendingFileRequest {
+    pub id:        u32,
+    pub filename:  String,
+    pub size:      u64,
+    pub from_peer: String,
+    /// Send `true` to accept, `false` to reject.
+    pub response:  tokio::sync::oneshot::Sender<bool>,
+}
+
+/// Shared list of incoming file-transfer requests waiting for user approval.
+pub type PendingRequests = Arc<Mutex<Vec<PendingFileRequest>>>;
 
 /// Live state the GUI reads.
 pub struct ServerHandle {
-    pub active: ActiveClientState,
+    pub active:   ActiveClientState,
+    pub pairing_code: String,
+    pub pending_file_requests: PendingRequests,
     file_send_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>,
 }
 
 impl ServerHandle {
-    /// Snapshot of connected clients: `(slot, name)`.
     pub fn clients(&self) -> Vec<(u8, String)> {
         self.active.clients_snapshot()
     }
@@ -35,14 +52,14 @@ impl ServerHandle {
 }
 
 /// Start the server subsystems and return a handle the GUI can read from.
-/// The actual TCP/audio/file tasks are spawned on the current tokio runtime.
 pub fn start(bind_addr: &str) -> anyhow::Result<ServerHandle> {
-    let active = ActiveClientState::default();
-    let audio  = ServerAudio::start()?;
+    let active  = ActiveClientState::default();
+    let audio   = ServerAudio::start()?;
+    let tls     = ServerTls::generate()?;
+    let pending: PendingRequests = Arc::new(Mutex::new(Vec::new()));
 
     // File-transfer listener + clipboard.
-    let (_clip_tx, send_queue_rx) = tokio::sync::mpsc::unbounded_channel();
-    file::start(send_queue_rx)?;
+    file::start(tls.clone(), pending.clone())?;
 
     // Channel for GUI-triggered file sends to the active client.
     let (file_send_tx, mut file_send_rx) =
@@ -61,14 +78,17 @@ pub fn start(bind_addr: &str) -> anyhow::Result<ServerHandle> {
         }
     });
 
-    // Control channel (blocks until shutdown — run as a detached task).
+    // Control channel.
     let bind = bind_addr.to_owned();
     let active_for_net = active.clone();
+    let pairing = tls.pairing_code.clone();
+    let tls_for_net = tls.clone();
     tokio::spawn(async move {
-        if let Err(e) = network::run_server(&bind, audio, active_for_net).await {
+        if let Err(e) = network::run_server(&bind, audio, active_for_net, tls_for_net, pairing).await {
             tracing::error!("Server network error: {e}");
         }
     });
 
-    Ok(ServerHandle { active, file_send_tx })
+    let pairing_code = tls.pairing_code.clone();
+    Ok(ServerHandle { active, pairing_code, pending_file_requests: pending, file_send_tx })
 }
