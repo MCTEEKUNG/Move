@@ -23,18 +23,19 @@ impl ClientAudio {
     pub fn start(server_addr: SocketAddr) -> Result<Self> {
         let host = cpal::default_host();
 
-        // Audio device capture (send this machine's sound to server).
-        // On Windows, we prefer the default output for loopback capture.
-        let capture_device = find_vbcable_input(&host)
-            .or_else(|| host.default_output_device());
-            
+        // Audio device capture (send this machine's desktop audio to server).
+        // Platform strategy:
+        //   Windows: prefer VB-Cable input, else WASAPI loopback via output device.
+        //   Linux:   look for PulseAudio/PipeWire monitor source (never use mic).
+        let capture_device = find_loopback_input(&host);
+
         match capture_device {
             Some(dev) => {
                 if let Err(e) = audio_capture::start(dev, server_addr) {
                     tracing::warn!("System audio capture disabled: {e}");
                 }
             }
-            None => tracing::warn!("No output device found — system audio capture disabled"),
+            None => tracing::warn!("No loopback/monitor device found — desktop audio capture disabled"),
         }
 
         // Playback device (received sound from server → this machine's speaker).
@@ -53,12 +54,46 @@ impl ClientAudio {
     }
 }
 
-fn find_vbcable_input(host: &cpal::Host) -> Option<cpal::Device> {
-    host.input_devices().ok()?.find(|d| {
-        d.name()
-            .map(|n| n.to_lowercase().contains("cable"))
-            .unwrap_or(false)
-    })
+/// Find the best device for capturing desktop (loopback) audio on this platform.
+///
+/// * Windows — prefer VB-Cable input; fall back to default output device
+///   (WASAPI will do loopback capture when build_input_stream is called on an
+///   output device).
+/// * Linux — look for a PulseAudio/PipeWire monitor source in the input device
+///   list. NEVER fall back to a real microphone.
+fn find_loopback_input(host: &cpal::Host) -> Option<cpal::Device> {
+    // Prefer VB-Cable on any platform (user may have installed it).
+    if let Some(dev) = host.input_devices().ok()?.find(|d| {
+        d.name().map(|n| n.to_lowercase().contains("cable")).unwrap_or(false)
+    }) {
+        return Some(dev);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // WASAPI loopback: build_input_stream on an output device captures
+        // everything playing through the speakers.
+        return host.default_output_device();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // PulseAudio/PipeWire exposes speaker output as a monitor input source.
+        // Never fall back to mic — that would send the wrong audio.
+        let dev = host.input_devices().ok()?.find(|d| {
+            d.name().map(|n| n.to_lowercase().contains("monitor")).unwrap_or(false)
+        });
+        if dev.is_none() {
+            tracing::warn!(
+                "No PulseAudio/PipeWire monitor source found — desktop audio capture disabled.\n\
+                 To fix, open 'pavucontrol' or run: pactl load-module module-null-sink"
+            );
+        }
+        return dev;
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    None
 }
 
 fn find_vbcable_output(host: &cpal::Host) -> Option<cpal::Device> {
