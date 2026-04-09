@@ -87,6 +87,7 @@ where
 
     writer.write_all(&header.to_bytes()).await?;
     writer.write_all(&payload).await?;
+    writer.flush().await?;
     Ok(())
 }
 

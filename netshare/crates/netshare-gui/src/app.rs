@@ -269,90 +269,249 @@ fn placed_center(edge: ClientEdge, size: egui::Vec2, srv: egui::Rect) -> egui::P
     }
 }
 
+/// Find which edge the dragged box is closest to snapping onto.
+fn closest_snap_edge(pos: egui::Pos2, srv: egui::Rect) -> ClientEdge {
+    let dist_right = (pos.x - (srv.right()  + PLACE_GAP)).abs() + (pos.y - srv.center().y).abs() * 0.3;
+    let dist_left  = (pos.x - (srv.left()   - PLACE_GAP)).abs() + (pos.y - srv.center().y).abs() * 0.3;
+    let dist_below = (pos.y - (srv.bottom() + PLACE_GAP)).abs() + (pos.x - srv.center().x).abs() * 0.3;
+    let dist_above = (pos.y - (srv.top()    - PLACE_GAP)).abs() + (pos.x - srv.center().x).abs() * 0.3;
+
+    let min = dist_right.min(dist_left).min(dist_below).min(dist_above);
+    if min == dist_right      { ClientEdge::Right }
+    else if min == dist_left  { ClientEdge::Left  }
+    else if min == dist_below { ClientEdge::Below }
+    else                      { ClientEdge::Above }
+}
+
 impl NetShareApp {
     fn render_dashboard(&mut self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
+        use netshare_core::layout::{ClientEdge, Placement};
+
+        // ── Status header ──────────────────────────────────────────────────────
+        ui.horizontal(|ui| {
             ui.heading(RichText::new("System Topology").strong().color(Color32::WHITE));
-            ui.label(RichText::new("Visual layout of your workspace").small().color(Color32::GRAY));
-            ui.add_space(20.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(client) = &self.services.client {
+                    let state = client.state.lock().unwrap();
+                    use netshare_client::ConnectionStatus;
+                    match &state.status {
+                        ConnectionStatus::Connected => {
+                            ui.label(RichText::new("● Connected").color(Color32::from_rgb(80, 220, 100)).strong());
+                        }
+                        ConnectionStatus::Connecting => {
+                            ui.label(RichText::new("◌ Connecting...").color(Color32::from_rgb(255, 200, 50)));
+                        }
+                        ConnectionStatus::Disconnected(_) => {
+                            ui.label(RichText::new("○ Disconnected").color(Color32::GRAY));
+                        }
+                    }
+                } else {
+                    ui.label(RichText::new("○ Not connected").color(Color32::GRAY));
+                }
+            });
+        });
+        ui.label(RichText::new("Drag a screen to reposition it  —  changes apply immediately").small().color(Color32::GRAY));
+        ui.add_space(10.0);
 
-            if let Some(handle) = &mut self.services.server {
-                let layout  = handle.layout();
-                let clients = handle.clients();
-                let pings   = handle.pings();
-                
-                let (canvas_rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 350.0), Sense::hover());
-                let painter = ui.painter_at(canvas_rect);
-                
-                // Background
-                painter.rect_filled(canvas_rect, 12.0, Color32::from_rgb(20, 22, 26));
-                painter.rect_stroke(canvas_rect, 12.0, Stroke::new(1.0, Color32::from_rgb(40, 42, 48)));
+        let Some(handle) = &mut self.services.server else {
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("Starting server...").color(Color32::GRAY));
+            });
+            return;
+        };
 
-                let (monitors, srv_anchor) = server_monitor_rects(&layout, canvas_rect.min, canvas_rect.width(), canvas_rect.height());
+        let mut layout         = handle.layout();
+        let clients            = handle.clients();
+        let pings              = handle.pings();
+        let mut layout_changed = false;
 
-                // Draw Server Monitors
-                let local_host = gethostname();
-                let server_name = handle.server_name(); // We need to add this method to ServerHandle
-                let is_local_server = server_name == local_host; 
+        // ── Canvas ─────────────────────────────────────────────────────────────
+        let canvas_size = egui::vec2(ui.available_width(), 340.0);
+        // We allocate with click_and_drag so the canvas receives pointer events.
+        let (canvas_rect, canvas_resp) =
+            ui.allocate_exact_size(canvas_size, Sense::click_and_drag());
+        let painter = ui.painter_at(canvas_rect);
 
-                for (rect, primary) in monitors {
-                    let fill = if primary { Color32::from_rgb(0, 40, 80) } else { Color32::from_rgb(20, 25, 30) };
-                    let stroke = if primary { Color32::from_rgb(0, 218, 243) } else { Color32::from_rgb(60, 65, 75) };
-                    painter.rect(rect, 6.0, fill, Stroke::new(2.0, stroke));
-                    
-                    let label = if is_local_server {
-                        if primary { "THIS MACHINE (HOST)".to_string() } else { "MONITOR".to_string() }
-                    } else {
-                        if primary { format!("REMOTE: {}", server_name) } else { "MONITOR".to_string() }
-                    };
-                    
-                    let res_label = format!("{}×{}", rect.width() as i32, rect.height() as i32); // Note: this is scaled px
-                    painter.text(rect.center() - egui::vec2(0.0, 5.0), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(10.0), Color32::from_gray(200));
-                    // Check if rect is big enough for res label
-                    if rect.height() > 30.0 {
-                        painter.text(rect.center() + egui::vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, format!("{}×{}", layout.server_width, layout.server_height), egui::FontId::proportional(8.0), Color32::from_gray(100));
+        // Background
+        painter.rect_filled(canvas_rect, 12.0, Color32::from_rgb(20, 22, 26));
+        painter.rect_stroke(canvas_rect, 12.0, Stroke::new(1.0, Color32::from_rgb(40, 42, 48)));
+
+        let (monitors, srv_anchor) =
+            server_monitor_rects(&layout, canvas_rect.min, canvas_rect.width(), canvas_rect.height());
+
+        // ── Drag-start detection ───────────────────────────────────────────────
+        // Must happen before drawing so we know which slot is active this frame.
+        if canvas_resp.drag_started() {
+            if let Some(ptr) = canvas_resp.interact_pointer_pos() {
+                // Pick the client box the user clicked on.
+                for (slot, _name) in &clients {
+                    let p = layout.placements.get(slot)
+                        .cloned()
+                        .unwrap_or(Placement { edge: ClientEdge::Right, client_width: 1920, client_height: 1080 });
+                    let rel_w = (p.client_width  as f32 / layout.server_width.max(1)  as f32) * 160.0;
+                    let rel_h = (p.client_height as f32 / layout.server_height.max(1) as f32) * 100.0;
+                    let size  = egui::vec2(rel_w.clamp(80.0, 200.0), rel_h.clamp(50.0, 120.0));
+                    let center = placed_center(p.edge, size, srv_anchor);
+                    let hit = egui::Rect::from_center_size(center, size);
+                    if hit.contains(ptr) {
+                        self.layout_drag.dragging_slot   = Some(*slot);
+                        self.layout_drag.drag_screen_pos = center;
+                        break;
                     }
                 }
-
-                // Draw Clients — show even if placement hasn't saved yet (use default).
-                for (slot, name) in clients {
-                    use netshare_core::layout::{ClientEdge, Placement};
-                    let default_placement = Placement {
-                        edge: ClientEdge::Right,
-                        client_width: 1920,
-                        client_height: 1080,
-                    };
-                    let p = layout.placements.get(&slot).unwrap_or(&default_placement);
-
-                    let rel_w = (p.client_width as f32 / layout.server_width.max(1) as f32) * 160.0;
-                    let rel_h = (p.client_height as f32 / layout.server_height.max(1) as f32) * 100.0;
-                    let size = egui::vec2(rel_w.clamp(80.0, 200.0), rel_h.clamp(50.0, 120.0));
-
-                    let center = placed_center(p.edge, size, srv_anchor);
-                    let rect = egui::Rect::from_center_size(center, size);
-
-                    // Glassmorphic Client Box
-                    painter.rect(rect, 6.0, Color32::from_rgba_premultiplied(0, 180, 200, 30), Stroke::new(1.5, Color32::from_rgb(0, 218, 243)));
-
-                    let ping = pings.get(&slot).copied().unwrap_or(0);
-                    painter.text(rect.center() - egui::vec2(0.0, 15.0), egui::Align2::CENTER_CENTER, &name, egui::FontId::proportional(12.0), Color32::WHITE);
-                    painter.text(rect.center() + egui::vec2(0.0, 3.0),  egui::Align2::CENTER_CENTER, format!("{}×{}", p.client_width, p.client_height), egui::FontId::proportional(9.0), Color32::from_gray(150));
-                    painter.text(rect.center() + egui::vec2(0.0, 20.0), egui::Align2::CENTER_CENTER, format!("{} ms", ping), egui::FontId::proportional(10.0), Color32::from_rgb(0, 218, 243));
-
-                    let (p1, p2) = match p.edge {
-                        ClientEdge::Right => (srv_anchor.right_center(),  rect.left_center()),
-                        ClientEdge::Left  => (srv_anchor.left_center(),   rect.right_center()),
-                        ClientEdge::Below => (srv_anchor.center_bottom(), rect.center_top()),
-                        ClientEdge::Above => (srv_anchor.center_top(),    rect.center_bottom()),
-                    };
-                    painter.line_segment([p1, p2], Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 218, 243, 80)));
-                }
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("Starting Server Subsystems...").color(Color32::GRAY));
-                });
             }
-        });
+        }
+
+        // Update drag position while dragging.
+        if canvas_resp.dragged() {
+            if self.layout_drag.dragging_slot.is_some() {
+                self.layout_drag.drag_screen_pos += canvas_resp.drag_delta();
+            }
+        }
+
+        // ── Snap-zone ghost outlines (shown while dragging) ────────────────────
+        let ghost_size = egui::vec2(110.0, 68.0);
+        if self.layout_drag.dragging_slot.is_some() {
+            for edge in [ClientEdge::Left, ClientEdge::Right, ClientEdge::Above, ClientEdge::Below] {
+                let center = placed_center(edge, ghost_size, srv_anchor);
+                let ghost  = egui::Rect::from_center_size(center, ghost_size);
+                if canvas_rect.contains_rect(ghost) || canvas_rect.intersects(ghost) {
+                    painter.rect_stroke(ghost, 6.0, Stroke::new(1.5,
+                        Color32::from_rgba_premultiplied(0, 218, 243, 55)));
+                    let arrow = match edge {
+                        ClientEdge::Left  => "◀",
+                        ClientEdge::Right => "▶",
+                        ClientEdge::Above => "▲",
+                        ClientEdge::Below => "▼",
+                    };
+                    painter.text(center, egui::Align2::CENTER_CENTER, arrow,
+                        egui::FontId::proportional(18.0),
+                        Color32::from_rgba_premultiplied(0, 218, 243, 90));
+                }
+            }
+        }
+
+        // ── Draw server monitors ───────────────────────────────────────────────
+        let local_host  = gethostname();
+        let server_name = handle.server_name();
+        let is_local    = server_name == local_host;
+
+        for (rect, primary) in &monitors {
+            let fill   = if *primary { Color32::from_rgb(0, 40, 80)   } else { Color32::from_rgb(20, 25, 30) };
+            let stroke = if *primary { Color32::from_rgb(0, 218, 243) } else { Color32::from_rgb(60, 65, 75) };
+            painter.rect(*rect, 6.0, fill, Stroke::new(2.0, stroke));
+
+            let label = if is_local {
+                if *primary { "THIS MACHINE".to_string() } else { "MONITOR".to_string() }
+            } else {
+                if *primary { format!("REMOTE: {server_name}") } else { "MONITOR".to_string() }
+            };
+            painter.text(rect.center() - egui::vec2(0.0, 6.0),
+                egui::Align2::CENTER_CENTER, label,
+                egui::FontId::proportional(10.0), Color32::from_gray(200));
+            if rect.height() > 30.0 {
+                painter.text(rect.center() + egui::vec2(0.0, 8.0),
+                    egui::Align2::CENTER_CENTER,
+                    format!("{}×{}", layout.server_width, layout.server_height),
+                    egui::FontId::proportional(8.0), Color32::from_gray(100));
+            }
+        }
+
+        // ── Draw client boxes (draggable) ──────────────────────────────────────
+        for (slot, name) in &clients {
+            let p = layout.placements.get(slot)
+                .cloned()
+                .unwrap_or(Placement { edge: ClientEdge::Right, client_width: 1920, client_height: 1080 });
+
+            let rel_w = (p.client_width  as f32 / layout.server_width.max(1)  as f32) * 160.0;
+            let rel_h = (p.client_height as f32 / layout.server_height.max(1) as f32) * 100.0;
+            let size  = egui::vec2(rel_w.clamp(80.0, 200.0), rel_h.clamp(50.0, 120.0));
+
+            let is_dragging = self.layout_drag.dragging_slot == Some(*slot);
+            let center = if is_dragging {
+                self.layout_drag.drag_screen_pos
+            } else {
+                placed_center(p.edge, size, srv_anchor)
+            };
+            let rect = egui::Rect::from_center_size(center, size);
+
+            // Snap edge for connector line (live preview while dragging)
+            let display_edge = if is_dragging {
+                closest_snap_edge(center, srv_anchor)
+            } else {
+                p.edge
+            };
+
+            // Connector line from server to client
+            let (p1, p2) = match display_edge {
+                ClientEdge::Right => (srv_anchor.right_center(),  rect.left_center()),
+                ClientEdge::Left  => (srv_anchor.left_center(),   rect.right_center()),
+                ClientEdge::Below => (srv_anchor.center_bottom(), rect.center_top()),
+                ClientEdge::Above => (srv_anchor.center_top(),    rect.center_bottom()),
+            };
+            painter.line_segment([p1, p2], Stroke::new(1.0,
+                Color32::from_rgba_premultiplied(0, 218, 243, if is_dragging { 130 } else { 80 })));
+
+            // Box fill / stroke
+            let fill   = if is_dragging {
+                Color32::from_rgba_premultiplied(0, 218, 243, 55)
+            } else {
+                Color32::from_rgba_premultiplied(0, 180, 200, 30)
+            };
+            let stroke_col = if is_dragging {
+                Color32::from_rgb(0, 243, 180)
+            } else {
+                Color32::from_rgb(0, 218, 243)
+            };
+            painter.rect(rect, 6.0, fill, Stroke::new(if is_dragging { 2.0 } else { 1.5 }, stroke_col));
+
+            let ping = pings.get(slot).copied().unwrap_or(0);
+            painter.text(rect.center() - egui::vec2(0.0, 15.0), egui::Align2::CENTER_CENTER,
+                name, egui::FontId::proportional(12.0), Color32::WHITE);
+            painter.text(rect.center() + egui::vec2(0.0, 3.0), egui::Align2::CENTER_CENTER,
+                format!("{}×{}", p.client_width, p.client_height),
+                egui::FontId::proportional(9.0), Color32::from_gray(150));
+            painter.text(rect.center() + egui::vec2(0.0, 19.0), egui::Align2::CENTER_CENTER,
+                format!("{} ms", ping),
+                egui::FontId::proportional(10.0), Color32::from_rgb(0, 218, 243));
+
+            // Drag cursor hint
+            if is_dragging {
+                painter.text(rect.center_top() - egui::vec2(0.0, 12.0),
+                    egui::Align2::CENTER_CENTER, "✥",
+                    egui::FontId::proportional(14.0), Color32::from_gray(200));
+            }
+        }
+
+        // ── Drag-release: snap & commit ────────────────────────────────────────
+        if canvas_resp.drag_stopped() {
+            if let Some(slot) = self.layout_drag.dragging_slot.take() {
+                let snap_pos = self.layout_drag.drag_screen_pos;
+                let new_edge = closest_snap_edge(snap_pos, srv_anchor);
+                let (cw, ch) = layout.placements.get(&slot)
+                    .map(|p| (p.client_width, p.client_height))
+                    .unwrap_or((1920, 1080));
+                // Evict any other client already at that edge.
+                layout.placements.retain(|k, p| *k == slot || p.edge != new_edge);
+                layout.placements.insert(slot, Placement { edge: new_edge, client_width: cw, client_height: ch });
+                layout_changed = true;
+                if let Some((_slot, name)) = clients.iter().find(|(s, _)| *s == slot) {
+                    log_info(&format!("Layout: {name} → {:?}", new_edge));
+                }
+            }
+        }
+
+        // Empty-state hint
+        if clients.is_empty() {
+            painter.text(canvas_rect.center(), egui::Align2::CENTER_CENTER,
+                "Waiting for a remote device to connect...",
+                egui::FontId::proportional(13.0), Color32::from_gray(70));
+        }
+
+        if layout_changed {
+            layout.save();
+            handle.set_layout(layout);
+        }
     }
 
     fn render_settings(&mut self, ui: &mut egui::Ui) {
