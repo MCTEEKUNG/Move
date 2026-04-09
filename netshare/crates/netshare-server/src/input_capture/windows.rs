@@ -214,8 +214,14 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 return LRESULT(1);
             }
 
-            // ── Edge detection ────────────────────────────────────────────
-            let edge_result = with_seamless(|s| {
+            // ── Edge detection ─────────────────────────────────────────────
+            // Check-and-lock is done atomically inside a single write-lock
+            // acquisition to prevent the TOCTOU race where two events could
+            // both see locked_to_slot == None and both trigger an EdgeEnter.
+            use netshare_core::layout::ClientEdge;
+            let edge_result = with_seamless_mut(|s| {
+                // Already locked — nothing to do.
+                if s.locked_to_slot.is_some() { return None; }
                 if s.layout.server_width == 0 || s.layout.server_height == 0 {
                     return None;
                 }
@@ -223,8 +229,6 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let x = info.pt.x;
                 let y = info.pt.y;
 
-                // Check each edge: find any slot placed at that edge.
-                use netshare_core::layout::ClientEdge;
                 let found_slot = s.layout.placements.iter().find_map(|(&slot, placement)| {
                     let on_edge = match placement.edge {
                         ClientEdge::Right  => x >= vx_max - 1,
@@ -238,27 +242,23 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 if let Some(slot) = found_slot {
                     let entry = s.layout.entry_pos(slot, x, y);
                     let server_edge = s.layout.placements[&slot].edge;
-                    // Compute lock position (edge pixel, clamped to the full virtual screen bounding box).
                     let (lx, ly) = match server_edge {
                         ClientEdge::Right  => (vx_max - 1, y.clamp(vy_min, vy_max - 1)),
                         ClientEdge::Left   => (vx_min,     y.clamp(vy_min, vy_max - 1)),
                         ClientEdge::Below  => (x.clamp(vx_min, vx_max - 1), vy_max - 1),
                         ClientEdge::Above  => (x.clamp(vx_min, vx_max - 1), vy_min),
                     };
+                    // Atomically set the lock — no other thread can race here.
+                    s.locked_to_slot = Some(slot);
+                    s.lock_x = lx;
+                    s.lock_y = ly;
                     return Some((slot, entry, lx, ly, server_edge));
                 }
                 None
             });
 
-
             if let Some((slot, entry, lock_x, lock_y, server_edge)) = edge_result {
                 let (entry_x, entry_y) = entry.unwrap_or((0, 0));
-                // Update seamless state.
-                with_seamless_mut(|s| {
-                    s.locked_to_slot = Some(slot);
-                    s.lock_x = lock_x;
-                    s.lock_y = lock_y;
-                });
                 // Lock cursor to lock position.
                 let _ = SetCursorPos(lock_x, lock_y);
                 let clip = RECT {
@@ -329,13 +329,10 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     }
 }
 
-fn mouse_click(button: MouseButton, action: ButtonAction, info: &MSLLHOOKSTRUCT) -> ControlPacket {
-    ControlPacket::MouseClick(MouseClick {
-        button,
-        action,
-        x: info.pt.x,
-        y: info.pt.y,
-    })
+fn mouse_click(button: MouseButton, action: ButtonAction, _info: &MSLLHOOKSTRUCT) -> ControlPacket {
+    // x/y are not transmitted: the client injects at its current cursor
+    // position (dx=0, dy=0 without MOUSEEVENTF_ABSOLUTE).
+    ControlPacket::MouseClick(MouseClick { button, action, x: 0, y: 0 })
 }
 
 fn send(evt: CaptureEvent) {
@@ -352,6 +349,10 @@ fn send(evt: CaptureEvent) {
 }
 
 /// Read-only access to seamless state from a hook callback.
+///
+/// Uses `try_lock` so the hook thread **never blocks** waiting for the network
+/// thread to release the mutex.  A missed check on one mouse event is harmless
+/// at 1 kHz poll rate.
 fn with_seamless<F, R>(f: F) -> R
 where
     F: FnOnce(&super::SeamlessState) -> R,
@@ -360,7 +361,8 @@ where
     SEAMLESS.with(|cell| {
         let arc = cell.take();
         let result = if let Some(ref a) = arc {
-            if let Ok(guard) = a.lock() {
+            // try_lock: non-blocking — skip if network thread holds the lock.
+            if let Ok(guard) = a.try_lock() {
                 f(&guard)
             } else {
                 R::default()
@@ -374,19 +376,26 @@ where
 }
 
 /// Mutable access to seamless state from a hook callback.
-fn with_seamless_mut<F>(f: F)
+/// Returns the value produced by `f` so callers can do atomic check-and-set.
+fn with_seamless_mut<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut super::SeamlessState),
+    F: FnOnce(&mut super::SeamlessState) -> R,
+    R: Default,
 {
     SEAMLESS.with(|cell| {
         let arc = cell.take();
-        if let Some(ref a) = arc {
-            if let Ok(mut guard) = a.lock() {
-                f(&mut guard);
+        let result = if let Some(ref a) = arc {
+            if let Ok(mut guard) = a.try_lock() {
+                f(&mut guard)
+            } else {
+                R::default()
             }
-        }
+        } else {
+            R::default()
+        };
         cell.set(arc);
-    });
+        result
+    })
 }
 
 /// Release the cursor clip and seamless lock.  Called from the network layer

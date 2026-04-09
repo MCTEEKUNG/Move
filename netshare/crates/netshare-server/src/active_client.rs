@@ -44,7 +44,7 @@ impl ActiveClientState {
     /// automatically here would forward all server mouse moves to the client
     /// the moment it connects — defeating edge detection entirely.
     pub fn register(&self, name: String, peer: SocketAddr) -> u8 {
-        let mut g = self.0.lock().unwrap();
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let slot = g.next_slot;
         g.next_slot = (slot % 9) + 1;
         g.clients.push(ClientInfo { slot, name, peer, last_ping_ms: 0 });
@@ -52,7 +52,7 @@ impl ActiveClientState {
     }
 
     pub fn deregister(&self, slot: u8) {
-        let mut g = self.0.lock().unwrap();
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
         g.clients.retain(|c| c.slot != slot);
         if g.active_slot == slot {
             g.active_slot = g.clients.first().map(|c| c.slot).unwrap_or(0);
@@ -62,7 +62,7 @@ impl ActiveClientState {
     /// Switch to a specific slot. Returns the change notification, or `None`
     /// if the slot is not connected.
     pub fn switch_to(&self, slot: u8) -> Option<ActiveClientChange> {
-        let mut g = self.0.lock().unwrap();
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let name = g.clients.iter().find(|c| c.slot == slot)?.name.clone();
         g.active_slot = slot;
         Some(ActiveClientChange { active_slot: slot, active_name: name })
@@ -70,7 +70,7 @@ impl ActiveClientState {
 
     /// Cycle to the next connected client.
     pub fn cycle(&self) -> Option<ActiveClientChange> {
-        let mut g = self.0.lock().unwrap();
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if g.clients.is_empty() { return None; }
         let pos = g.clients.iter().position(|c| c.slot == g.active_slot);
         let next = match pos {
@@ -83,13 +83,13 @@ impl ActiveClientState {
     }
 
     pub fn active_slot(&self) -> u8 {
-        self.0.lock().unwrap().active_slot
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).active_slot
     }
 
     /// Returns the TCP peer IP of the currently active client, combined with
     /// the audio port (9002) — used to route mic UDP packets.
     pub fn active_client_audio_addr(&self) -> Option<SocketAddr> {
-        let g = self.0.lock().unwrap();
+        let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
         g.clients
             .iter()
             .find(|c| c.slot == g.active_slot)
@@ -98,7 +98,7 @@ impl ActiveClientState {
 
     /// Returns the IP of the currently active client — used for file sends.
     pub fn active_client_ip(&self) -> Option<std::net::IpAddr> {
-        let g = self.0.lock().unwrap();
+        let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
         g.clients
             .iter()
             .find(|c| c.slot == g.active_slot)
@@ -107,35 +107,35 @@ impl ActiveClientState {
 
     /// Snapshot of connected clients for GUI display: `(slot, name)`.
     pub fn clients_snapshot(&self) -> Vec<(u8, String)> {
-        let g = self.0.lock().unwrap();
+        let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
         g.clients.iter().map(|c| (c.slot, c.name.clone())).collect()
     }
 
     /// Snapshot of all client pings: `(slot, ping_ms)`.
     pub fn pings_snapshot(&self) -> std::collections::HashMap<u8, u64> {
-        let g = self.0.lock().unwrap();
+        let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
         g.clients.iter().map(|c| (c.slot, c.last_ping_ms)).collect()
     }
 
     /// Update the ping value for a specific slot.
     pub fn update_ping(&self, slot: u8, ping_ms: u64) {
-        let mut g = self.0.lock().unwrap();
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(c) = g.clients.iter_mut().find(|c| c.slot == slot) {
             c.last_ping_ms = ping_ms;
         }
     }
 
     pub fn broadcast_mode(&self) -> bool {
-        self.0.lock().unwrap().broadcast_mode
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).broadcast_mode
     }
 
     pub fn set_broadcast_mode(&self, val: bool) {
-        self.0.lock().unwrap().broadcast_mode = val;
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).broadcast_mode = val;
     }
 
     /// Force-set active slot without validation (used for seamless cursor events).
     /// slot=0 means server is active.
     pub fn force_active(&self, slot: u8) {
-        self.0.lock().unwrap().active_slot = slot;
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).active_slot = slot;
     }
 }

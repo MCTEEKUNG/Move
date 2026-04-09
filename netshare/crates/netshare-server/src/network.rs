@@ -51,7 +51,7 @@ pub async fn run_server(
                 CaptureEvent::InputPacket(pkt) => {
                     let active = fan_state.active_slot();
                     if active == 0 { continue; }
-                    let map = fan_map.lock().unwrap();
+                    let map = fan_map.lock().unwrap_or_else(|e| e.into_inner());
                     if fan_state.broadcast_mode() {
                         for tx in map.values() { let _ = tx.send(pkt.clone()); }
                     } else if let Some(tx) = map.get(&active) {
@@ -66,7 +66,7 @@ pub async fn run_server(
                     if let Some(change) = change {
                         fan_audio.set_mic_target(fan_state.active_client_audio_addr());
                         let notification = ControlPacket::ActiveClientChange(change);
-                        let map = fan_map.lock().unwrap();
+                        let map = fan_map.lock().unwrap_or_else(|e| e.into_inner());
                         for tx in map.values() {
                             let _ = tx.send(notification.clone());
                         }
@@ -78,7 +78,7 @@ pub async fn run_server(
                     // Compute the return edge (opposite of the server edge the cursor crossed).
                     let return_edge = netshare_core::layout::LayoutConfig::return_edge(server_edge);
                     // Send CursorEnter to that client.
-                    let map = fan_map.lock().unwrap();
+                    let map = fan_map.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(tx) = map.get(&slot) {
                         let _ = tx.send(ControlPacket::CursorEnter { x: entry_x, y: entry_y, return_edge });
                     }
@@ -177,7 +177,7 @@ async fn handle_client(
 
     // Auto-create a default placement for this client slot if not already configured.
     {
-        let mut s = seamless.lock().unwrap();
+        let mut s = seamless.lock().unwrap_or_else(|e| e.into_inner());
         if !s.layout.placements.contains_key(&slot) {
             use netshare_core::layout::{ClientEdge, Placement};
             
@@ -233,7 +233,7 @@ async fn handle_client(
 
     // ── Register in fan-out map ────────────────────────────────────────────
     let (client_tx, mut client_rx) = mpsc::unbounded_channel::<ControlPacket>();
-    client_map.lock().unwrap().insert(slot, client_tx.clone());
+    client_map.lock().unwrap_or_else(|e| e.into_inner()).insert(slot, client_tx.clone());
 
     // ── Heartbeat/Ping loop ────────────────────────────────────────────────
     let hb_state = state.clone();
@@ -263,7 +263,7 @@ async fn handle_client(
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             {
-                let mut guard = last_sent_for_hb.lock().unwrap();
+                let mut guard = last_sent_for_hb.lock().unwrap_or_else(|e| e.into_inner());
                 *guard = Some(std::time::Instant::now());
             }
             if hb_tx_2.send(ControlPacket::Heartbeat).is_err() { break; }
@@ -281,43 +281,56 @@ async fn handle_client(
     });
 
     // ── Reader loop (heartbeat / disconnect / cursor-return) ───────────────
+    // Each read_packet call is wrapped in a 15-second timeout.  The client
+    // echoes heartbeats every 3 s, so 15 s with no packet means a zombie
+    // connection and we tear it down rather than leaking the slot forever.
     let result = loop {
-        match read_packet(&mut reader).await {
-            Ok((_, ControlPacket::Heartbeat))  => {
+        let read_result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            read_packet(&mut reader),
+        ).await;
+
+        match read_result {
+            Err(_elapsed) => {
+                warn!("Client slot {slot} timed out (no data for 15 s) — dropping");
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "client heartbeat timeout",
+                ).into());
+            }
+            Ok(Err(e)) => break Err(e),
+            Ok(Ok((_, ControlPacket::Heartbeat))) => {
                 let now = std::time::Instant::now();
-                let mut guard = last_hb_sent.lock().unwrap();
+                let mut guard = last_hb_sent.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(start) = guard.take() {
                     let rtt = now.duration_since(start).as_millis() as u64;
                     state.update_ping(slot, rtt);
                 }
             }
-            Ok((_, ControlPacket::Disconnect)) => {
+            Ok(Ok((_, ControlPacket::Disconnect))) => {
                 info!("Client slot {slot} disconnected cleanly");
                 break Ok(());
             }
-            Ok((_, ControlPacket::CursorReturn)) => {
-                // Release cursor lock; switch active back to server (slot=0).
+            Ok(Ok((_, ControlPacket::CursorReturn))) => {
                 state.force_active(0);
                 {
-                    let mut s = seamless.lock().unwrap();
+                    let mut s = seamless.lock().unwrap_or_else(|e| e.into_inner());
                     s.locked_to_slot = None;
                 }
-                // Release ClipCursor via the platform hook.
                 #[cfg(target_os = "windows")]
                 crate::input_capture::windows::release_cursor();
                 info!("CursorReturn from slot {slot} — cursor returned to server");
             }
-            Ok((_, other)) => warn!("unexpected packet from client: {:?}", other),
-            Err(e)         => break Err(e),
+            Ok(Ok((_, other))) => warn!("unexpected packet from client: {:?}", other),
         }
     };
 
     // ── Cleanup ────────────────────────────────────────────────────────────
-    client_map.lock().unwrap().remove(&slot);
+    client_map.lock().unwrap_or_else(|e| e.into_inner()).remove(&slot);
     state.deregister(slot);
     // Remove the placement so reconnect gets a fresh auto-assignment.
     {
-        let mut s = seamless.lock().unwrap();
+        let mut s = seamless.lock().unwrap_or_else(|e| e.into_inner());
         s.layout.placements.remove(&slot);
         s.layout.save();
     }

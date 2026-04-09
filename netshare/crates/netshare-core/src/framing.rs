@@ -60,9 +60,13 @@ where
     Ok((header.pkt_type, value))
 }
 
-/// Maximum allowed payload size (4 MB). Prevents memory exhaustion from a
-/// malformed or malicious peer.
+/// Maximum payload for file/clipboard channels (4 MB per chunk).
 const MAX_PAYLOAD: u32 = 4 * 1024 * 1024;
+
+/// Maximum payload for control-channel packets (64 KB).
+/// Control packets (Hello, MouseMove, KeyEvent, etc.) are always tiny.
+/// A hard cap prevents an OOM DoS from a malicious peer claiming a huge length.
+const MAX_CONTROL_PAYLOAD: u32 = 64 * 1024;
 
 static SEQ: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
@@ -92,6 +96,9 @@ where
 }
 
 /// Read one `ControlPacket` from `reader`.
+///
+/// Enforces `MAX_CONTROL_PAYLOAD` (64 KB) to prevent OOM from a malicious peer
+/// claiming a multi-MB control packet.
 pub async fn read_packet<R>(reader: &mut R) -> io::Result<(PacketHeader, ControlPacket)>
 where
     R: AsyncReadExt + Unpin,
@@ -100,10 +107,13 @@ where
     reader.read_exact(&mut hdr_buf).await?;
     let header = PacketHeader::from_bytes(&hdr_buf);
 
-    if header.length > MAX_PAYLOAD {
+    if header.length > MAX_CONTROL_PAYLOAD {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("payload too large: {} bytes", header.length),
+            format!(
+                "control packet too large: {} bytes (max {})",
+                header.length, MAX_CONTROL_PAYLOAD
+            ),
         ));
     }
 

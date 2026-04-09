@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use crc32fast::Hasher as Crc32Hasher;
 use sha2::{Digest, Sha256};
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, BufWriter};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, BufWriter};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 use walkdir::WalkDir;
@@ -85,11 +85,25 @@ where
     let transfer_id = next_transfer_id();
     info!("[{transfer_id}] Sending '{relative_path}'");
 
-    // ── Pre-compute SHA-256 ────────────────────────────────────────────────
+    // ── Open file once; compute SHA-256 in first pass ──────────────────────
+    // Using a single file handle avoids re-opening (and re-reading from disk)
+    // a second time.  After the hash pass we seek back to the resume offset.
     let metadata = tokio::fs::metadata(path).await?;
-    let total_size = metadata.len();
+    let total_size   = metadata.len();
     let total_chunks = total_chunks_for(total_size);
-    let sha256 = sha256_file(path).await?;
+
+    let mut file = File::open(path).await?;
+    let sha256 = {
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 { break; }
+            hasher.update(&buf[..n]);
+        }
+        let digest: [u8; 32] = hasher.finalize().into();
+        digest
+    };
 
     // ── Send FileRequest ───────────────────────────────────────────────────
     let req = FilePacket::Request(FileRequest {
@@ -117,13 +131,8 @@ where
         info!("[{transfer_id}] Resuming from chunk {start_chunk}");
     }
 
-    // ── Send chunks ────────────────────────────────────────────────────────
-    let mut file = File::open(path).await?;
-    // Seek to resume offset.
-    if start_chunk > 0 {
-        use tokio::io::AsyncSeekExt;
-        file.seek(std::io::SeekFrom::Start(start_chunk as u64 * CHUNK_SIZE as u64)).await?;
-    }
+    // ── Seek to resume offset (reuse the already-open file handle) ─────────
+    file.seek(std::io::SeekFrom::Start(start_chunk as u64 * CHUNK_SIZE as u64)).await?;
 
     let mut buf = vec![0u8; CHUNK_SIZE];
     for chunk_idx in start_chunk..total_chunks {
@@ -163,18 +172,10 @@ where
     Ok(())
 }
 
+/// Compute the number of 256 KiB chunks for a file of `size` bytes.
+/// Saturates at `u32::MAX` for files > ~1 TiB instead of silently wrapping.
 fn total_chunks_for(size: u64) -> u32 {
-    ((size + CHUNK_SIZE as u64 - 1) / CHUNK_SIZE as u64) as u32
-}
-
-async fn sha256_file(path: &Path) -> Result<[u8; 32]> {
-    let mut file = File::open(path).await?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buf).await?;
-        if n == 0 { break; }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher.finalize().into())
+    ((size + CHUNK_SIZE as u64 - 1) / CHUNK_SIZE as u64)
+        .try_into()
+        .unwrap_or(u32::MAX)
 }

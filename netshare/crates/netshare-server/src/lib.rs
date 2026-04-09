@@ -59,12 +59,12 @@ impl ServerHandle {
     }
     /// Update the layout config used by the seamless cursor engine.
     pub fn set_layout(&self, layout: LayoutConfig) {
-        let mut s = self.seamless.lock().unwrap();
+        let mut s = self.seamless.lock().unwrap_or_else(|e| e.into_inner());
         s.layout = layout;
     }
     /// Get a snapshot of the current layout config.
     pub fn layout(&self) -> LayoutConfig {
-        self.seamless.lock().unwrap().layout.clone()
+        self.seamless.lock().unwrap_or_else(|e| e.into_inner()).layout.clone()
     }
     /// Get the server's hostname.
     pub fn server_name(&self) -> String {

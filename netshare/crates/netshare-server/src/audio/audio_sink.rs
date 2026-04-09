@@ -56,7 +56,7 @@ pub fn start(listen_port: u16) -> Result<()> {
                 written += take;
 
                 while written < out.len() {
-                    match playout_cpal.lock().unwrap().pop() {
+                    match playout_cpal.lock().unwrap_or_else(|e| e.into_inner()).pop() {
                         Some(frame) => {
                             let take = frame.len().min(out.len() - written);
                             out[written..written + take].copy_from_slice(&frame[..take]);
@@ -116,7 +116,7 @@ pub fn start(listen_port: u16) -> Result<()> {
             match decoder.decode_float(&udp_buf[..n], &mut pcm_buf, false) {
                 Ok(samples) => {
                     let frame = pcm_buf[..samples * CHANNELS as usize].to_vec();
-                    playout.lock().unwrap().push(frame);
+                    playout.lock().unwrap_or_else(|e| e.into_inner()).push(frame);
                 }
                 Err(e) => warn!("Opus decode error: {e}"),
             }

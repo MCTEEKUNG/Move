@@ -41,7 +41,7 @@ pub async fn handle_incoming<R, W>(
     // ── File-accept prompt ─────────────────────────────────────────────────
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
     {
-        let mut list = pending.lock().unwrap();
+        let mut list = pending.lock().unwrap_or_else(|e| e.into_inner());
         list.push(PendingFileRequest {
             id:        req.transfer_id,
             filename:  req.relative_path.clone(),
@@ -70,8 +70,16 @@ pub async fn handle_incoming<R, W>(
         return;
     }
 
-    if let Err(e) = receive_file(reader, writer, req, recv_dir).await {
-        warn!("file receive error: {e}");
+    // 5-minute per-file timeout — prevents the receiver thread/FD from leaking
+    // indefinitely if the sender stalls or disconnects mid-transfer.
+    let id = req.transfer_id;
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        receive_file(reader, writer, req, recv_dir),
+    ).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!("[{id}] file receive error: {e}"),
+        Err(_)     => warn!("[{id}] file transfer timed out after 5 minutes"),
     }
 }
 
@@ -105,6 +113,18 @@ where
     };
 
     let final_path = recv_dir.join(&rel);
+
+    // Guard against symlink-based path traversal: after resolving the full
+    // path, verify it is still inside recv_dir.
+    if let (Ok(canon_final), Ok(canon_dir)) = (
+        std::fs::canonicalize(recv_dir.join(&rel).parent().unwrap_or(recv_dir)),
+        std::fs::canonicalize(recv_dir),
+    ) {
+        if !canon_final.starts_with(&canon_dir) {
+            anyhow::bail!("path traversal detected for '{}'", req.relative_path);
+        }
+    }
+
     let part_path  = final_path.with_extension(
         format!("{}.part", final_path.extension().and_then(|e| e.to_str()).unwrap_or(""))
     );

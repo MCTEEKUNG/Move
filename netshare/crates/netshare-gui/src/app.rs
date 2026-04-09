@@ -292,7 +292,7 @@ impl NetShareApp {
             ui.heading(RichText::new("System Topology").strong().color(Color32::WHITE));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(client) = &self.services.client {
-                    let state = client.state.lock().unwrap();
+                    let state = client.state.lock().unwrap_or_else(|e| e.into_inner());
                     use netshare_client::ConnectionStatus;
                     match &state.status {
                         ConnectionStatus::Connected => {
@@ -527,7 +527,7 @@ impl NetShareApp {
                 ui.label(format!("Hostname : {}", gethostname()));
                 ui.label(format!("Address  : {}", self.bind_addr));
                 if let Some(c) = &self.services.client {
-                    let s = c.state.lock().unwrap();
+                    let s = c.state.lock().unwrap_or_else(|e| e.into_inner());
                     ui.label(format!("Connected to : {}", c.server_addr()));
                     use netshare_client::ConnectionStatus;
                     let status = match &s.status {
@@ -664,7 +664,7 @@ impl NetShareApp {
                     .stick_to_bottom(true)
                     .max_height(f32::INFINITY)
                     .show(ui, |ui| {
-                        let logs = GLOBAL_LOGS.lock().unwrap();
+                        let logs = GLOBAL_LOGS.lock().unwrap_or_else(|e| e.into_inner());
                         for entry in &logs.entries {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&entry.time).color(Color32::DARK_GRAY).monospace().size(11.0));
@@ -684,8 +684,8 @@ impl NetShareApp {
 
 // ── Log Helpers ─────────────────────────────────────────────────────────────
 
-fn log_info(msg: &str) { GLOBAL_LOGS.lock().unwrap().add("INFO", msg); }
-fn log_error(msg: &str) { GLOBAL_LOGS.lock().unwrap().add("ERROR", msg); }
+fn log_info(msg: &str) { GLOBAL_LOGS.lock().unwrap_or_else(|e| e.into_inner()).add("INFO", msg); }
+fn log_error(msg: &str) { GLOBAL_LOGS.lock().unwrap_or_else(|e| e.into_inner()).add("ERROR", msg); }
 
 fn gethostname() -> String {
     std::env::var("COMPUTERNAME")

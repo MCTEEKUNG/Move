@@ -42,14 +42,14 @@ pub async fn run_client(
     gui: Arc<Mutex<ClientGuiState>>,
 ) -> anyhow::Result<()> {
     {
-        let mut s = gui.lock().unwrap();
+        let mut s = gui.lock().unwrap_or_else(|e| e.into_inner());
         s.status = ConnectionStatus::Connecting;
     }
 
     let tcp = TcpStream::connect(server_addr).await
         .map_err(|e| {
             let msg = e.to_string();
-            gui.lock().unwrap().status = ConnectionStatus::Disconnected(msg.clone());
+            gui.lock().unwrap_or_else(|e| e.into_inner()).status = ConnectionStatus::Disconnected(msg.clone());
             anyhow::anyhow!(msg)
         })?;
     tcp.set_nodelay(true)?;
@@ -62,7 +62,7 @@ pub async fn run_client(
     let tls_stream = connector.connect(server_name, tcp).await
         .map_err(|e| {
             let msg = format!("TLS handshake failed: {e}");
-            gui.lock().unwrap().status = ConnectionStatus::Disconnected(msg.clone());
+            gui.lock().unwrap_or_else(|e| e.into_inner()).status = ConnectionStatus::Disconnected(msg.clone());
             anyhow::anyhow!(msg)
         })?;
     info!("TLS connected to {server_addr}");
@@ -87,12 +87,12 @@ pub async fn run_client(
 
     if !resp.accepted {
         let reason = resp.reject_reason.unwrap_or_default();
-        gui.lock().unwrap().status = ConnectionStatus::Disconnected(reason.clone());
+        gui.lock().unwrap_or_else(|e| e.into_inner()).status = ConnectionStatus::Disconnected(reason.clone());
         anyhow::bail!("Server rejected: {reason}");
     }
 
     {
-        let mut s = gui.lock().unwrap();
+        let mut s = gui.lock().unwrap_or_else(|e| e.into_inner());
         s.status        = ConnectionStatus::Connected;
         s.server_name   = resp.server_name.clone();
         s.assigned_slot = resp.assigned_slot;
@@ -121,7 +121,7 @@ pub async fn run_client(
 
                 // Use the return_edge from the packet; also store in gui state.
                 let (sw, sh) = {
-                    let mut s = gui.lock().unwrap();
+                    let mut s = gui.lock().unwrap_or_else(|e| e.into_inner());
                     s.return_edge = Some(return_edge);
                     (s.screen_width, s.screen_height)
                 };
@@ -134,7 +134,7 @@ pub async fn run_client(
 
             ControlPacket::ActiveClientChange(change) => {
                 info!("Active client → slot {} ('{}')", change.active_slot, change.active_name);
-                let mut s = gui.lock().unwrap();
+                let mut s = gui.lock().unwrap_or_else(|e| e.into_inner());
                 s.active_slot = change.active_slot;
                 s.active_name = change.active_name;
             }
@@ -155,7 +155,7 @@ pub async fn run_client(
         }
     };
 
-    gui.lock().unwrap().status = ConnectionStatus::Disconnected(
+    gui.lock().unwrap_or_else(|e| e.into_inner()).status = ConnectionStatus::Disconnected(
         result.as_ref().err().map(|e| e.to_string()).unwrap_or_default()
     );
     result

@@ -20,11 +20,32 @@ pub(super) fn run_evdev(
     tx: mpsc::UnboundedSender<CaptureEvent>,
     seamless: SharedSeamlessState,
 ) {
-    let devices: Vec<_> = evdev::enumerate().collect();
+    // Enumerate and separate readable devices from permission-denied ones so
+    // the user gets an actionable error message instead of a silent failure.
+    let all_paths: Vec<_> = evdev::enumerate().map(|(p, _)| p).collect();
+    let (readable_paths, denied_paths): (Vec<_>, Vec<_>) = all_paths
+        .iter()
+        .partition(|p| std::fs::metadata(p).is_ok());
+
+    if !denied_paths.is_empty() {
+        warn!(
+            "Cannot read {} evdev device(s) — permission denied:\n  {}\n  \
+             Fix: sudo usermod -aG input $USER  (then log out and back in)",
+            denied_paths.len(),
+            denied_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n  ")
+        );
+    }
+
+    let devices: Vec<_> = evdev::enumerate()
+        .filter(|(p, _)| readable_paths.contains(&p))
+        .collect();
 
     if devices.is_empty() {
-        warn!("No evdev devices found. Make sure user is in 'input' group: sudo usermod -aG input $USER");
-        return;
+        if denied_paths.is_empty() {
+            warn!("No evdev keyboard/mouse devices found in /dev/input/");
+        }
+        // Watcher still starts so seamless state is maintained (edge detection
+        // will be a no-op until a device becomes readable).
     }
 
     // Spawn the x11rb seamless cursor watcher (edge detection + cursor lock).
@@ -90,7 +111,7 @@ fn seamless_watcher(tx: mpsc::UnboundedSender<CaptureEvent>, seamless: SharedSea
         let cx = reply.root_x as i32;
         let cy = reply.root_y as i32;
 
-        let mut state = seamless.lock().unwrap();
+        let mut state = seamless.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Some(_slot) = state.locked_to_slot {
             // Already locked — keep warping back to the lock pixel.
@@ -162,7 +183,7 @@ fn read_device_loop(
             }
         };
 
-        let locked = seamless.lock().unwrap().locked_to_slot;
+        let locked = seamless.lock().unwrap_or_else(|e| e.into_inner()).locked_to_slot;
 
         for ev in events {
             let pkt: Option<ControlPacket> = match ev.kind() {

@@ -47,7 +47,7 @@ impl ServerAudio {
 
     /// Called by the network layer when the active client changes.
     pub fn set_mic_target(&self, addr: Option<SocketAddr>) {
-        *self.mic_target.lock().unwrap() = addr;
+        *self.mic_target.lock().unwrap_or_else(|e| e.into_inner()) = addr;
     }
 
     pub fn set_mic_muted(&self, muted: bool) {

@@ -35,12 +35,15 @@ pub fn inject_mouse_move(ev: MouseMove) {
 pub fn inject_mouse_click(ev: MouseClick) {
     let (down_flag, up_flag, data) = button_flags(ev.button);
     let flags = if ev.action == ButtonAction::Press { down_flag } else { up_flag };
+    // dx/dy are NOT set: without MOUSEEVENTF_ABSOLUTE the values would be
+    // treated as a relative delta (moving the cursor by hundreds of pixels).
+    // Instead inject at the current cursor position (dx=0, dy=0).
     let input = INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
             mi: MOUSEINPUT {
-                dx: ev.x,
-                dy: ev.y,
+                dx: 0,
+                dy: 0,
                 mouseData: data,
                 dwFlags: flags,
                 time: 0,

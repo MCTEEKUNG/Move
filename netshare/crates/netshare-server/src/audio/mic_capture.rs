@@ -126,7 +126,7 @@ pub fn start(
         while let Some(pcm) = async_rx.recv().await {
             if muted.load(Ordering::Relaxed) { continue; }
 
-            let target = *mic_target.lock().unwrap();
+            let target = *mic_target.lock().unwrap_or_else(|e| e.into_inner());
             let Some(addr) = target else { continue };
 
             match encoder.encode_float(&pcm, &mut out_buf) {
