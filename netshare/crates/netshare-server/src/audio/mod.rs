@@ -31,7 +31,9 @@ impl ServerAudio {
     /// If audio hardware is unavailable, returns a no-op instance (server still works).
     pub fn start() -> Result<Self> {
         let mic_target: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
-        let mic_muted: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        // Default to muted — prevents feedback loop when both machines run hub mode.
+        // User enables audio sharing explicitly in Settings.
+        let mic_muted: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
 
         if let Err(e) = mic_capture::start(Arc::clone(&mic_target), Arc::clone(&mic_muted)) {
             tracing::warn!("Mic capture disabled: {e}");

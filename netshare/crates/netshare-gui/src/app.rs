@@ -389,18 +389,19 @@ impl NetShareApp {
                     .color(Color32::from_rgb(0, 218, 243)));
                 ui.add_space(6.0);
                 if let Some(handle) = &self.services.server {
-                    let mut muted = handle.is_mic_muted();
-                    if ui.checkbox(&mut muted, "🔇 Mute desktop audio sharing")
+                    // audio_enabled is the inverse of muted
+                    let mut audio_enabled = !handle.is_mic_muted();
+                    if ui.checkbox(&mut audio_enabled, "🔊 Share desktop audio with remote device")
                         .changed()
                     {
-                        handle.set_mic_muted(muted);
-                        log_info(if muted { "Desktop audio muted" } else { "Desktop audio unmuted" });
+                        handle.set_mic_muted(!audio_enabled);
+                        log_info(if audio_enabled { "Desktop audio sharing enabled" } else { "Desktop audio sharing disabled" });
                     }
                     ui.label(
                         RichText::new(
-                            "Streams this machine's speaker output to the other device. \
-                             On Linux: requires a PulseAudio/PipeWire monitor source.",
-                        ).small().color(Color32::GRAY),
+                            "Streams this machine's speaker output to the connected device.\n\
+                             ⚠ Enable on ONE machine only to avoid audio echo feedback.",
+                        ).small().color(Color32::from_rgb(200, 160, 80)),
                     );
                 }
             });

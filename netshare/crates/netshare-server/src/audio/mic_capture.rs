@@ -57,11 +57,16 @@ pub fn start(
             };
             info!("Desktop audio capture device: {}", device.name().unwrap_or_default());
 
-            let config = cpal::StreamConfig {
-                channels:    CHANNELS,
-                sample_rate: cpal::SampleRate(SAMPLE_RATE),
-                buffer_size: cpal::BufferSize::Default,
-            };
+            // Use the device's native config where possible to avoid resampling
+            // artifacts (especially important for WASAPI loopback on Windows).
+            let config = device
+                .default_input_config()
+                .map(|c| c.into())
+                .unwrap_or_else(|_| cpal::StreamConfig {
+                    channels:    CHANNELS,
+                    sample_rate: cpal::SampleRate(SAMPLE_RATE),
+                    buffer_size: cpal::BufferSize::Default,
+                });
 
             let mut buf: Vec<f32> = Vec::with_capacity(FRAME_INTERLEAVED * 2);
 
