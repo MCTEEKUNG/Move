@@ -3066,6 +3066,7 @@ dependencies = [
  "chrono",
  "eframe",
  "egui",
+ "gtk",
  "lazy_static",
  "mdns-sd",
  "netshare-client",
@@ -3102,6 +3103,7 @@ dependencies = [
  "tracing-subscriber",
  "walkdir",
  "windows 0.58.0",
+ "x11rb",
 ]
 
 [[package]]

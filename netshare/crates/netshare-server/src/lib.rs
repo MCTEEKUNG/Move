@@ -166,7 +166,45 @@ fn enumerate_server_monitors() -> Vec<netshare_core::layout::MonitorInfo> {
     monitors
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn enumerate_server_monitors() -> Vec<netshare_core::layout::MonitorInfo> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::randr::ConnectionExt as RandrExt;
+    use netshare_core::layout::MonitorInfo;
+
+    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+        tracing::warn!("x11rb connect failed — using fallback 1920×1080");
+        return vec![MonitorInfo { x: 0, y: 0, width: 1920, height: 1080, is_primary: true }];
+    };
+
+    let root = conn.setup().roots[screen_num].root;
+
+    // Try RandR for multi-monitor support.
+    if let Ok(monitors_reply) = conn.randr_get_monitors(root, true).and_then(|c| c.reply()) {
+        let infos: Vec<MonitorInfo> = monitors_reply.monitors.iter().map(|m| MonitorInfo {
+            x:          m.x as i32,
+            y:          m.y as i32,
+            width:      m.width as i32,
+            height:     m.height as i32,
+            is_primary: m.primary,
+        }).collect();
+        if !infos.is_empty() {
+            return infos;
+        }
+    }
+
+    // Fallback: use root window dimensions as single monitor.
+    let setup = conn.setup();
+    let screen = &setup.roots[screen_num];
+    vec![MonitorInfo {
+        x: 0, y: 0,
+        width:  screen.width_in_pixels  as i32,
+        height: screen.height_in_pixels as i32,
+        is_primary: true,
+    }]
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn enumerate_server_monitors() -> Vec<netshare_core::layout::MonitorInfo> {
     vec![netshare_core::layout::MonitorInfo {
         x: 0, y: 0, width: 1920, height: 1080, is_primary: true,
