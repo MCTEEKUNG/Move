@@ -19,6 +19,7 @@ sudo apt-get install -y --no-install-recommends \
     libxrandr-dev \
     libxi-dev \
     libxtst-dev \
+    libxdo-dev \
     libglib2.0-dev \
     libgtk-3-dev
 
