@@ -165,31 +165,36 @@ fn find_loopback_device(host: &cpal::Host) -> Option<cpal::Device> {
 
     #[cfg(target_os = "linux")]
     {
-        // PulseAudio/PipeWire: monitor sources appear in the input device list
-        // with "monitor" in their name.
+        // PulseAudio/PipeWire exposes desktop audio as a monitor source —
+        // an input device whose name contains "monitor".
+        // We NEVER fall back to a real microphone here: the user wants
+        // desktop audio only, not mic audio.
         let devices = match host.input_devices() {
             Ok(d) => d,
             Err(e) => {
                 warn!("Failed to enumerate input devices: {e}");
-                return host.default_input_device();
+                return None;
             }
         };
 
         for dev in devices {
-            let name = dev.name().unwrap_or_default().to_lowercase();
-            if name.contains("monitor") {
-                info!("Found PulseAudio/PipeWire monitor source: {}", dev.name().unwrap_or_default());
+            let name = dev.name().unwrap_or_default();
+            if name.to_lowercase().contains("monitor") {
+                info!("Found desktop audio monitor source: {name}");
                 return Some(dev);
             }
         }
 
-        // No monitor source found — fall back to mic.
+        // No monitor source found — disable audio capture entirely.
+        // Do NOT fall back to microphone (would send wrong audio).
         warn!(
-            "No PulseAudio/PipeWire monitor source found. \
-             To enable desktop audio on Linux, run: \
-             pactl load-module module-loopback"
+            "No PulseAudio/PipeWire monitor source found — desktop audio disabled.\n\
+             Fix: open pavucontrol, or run:\n\
+             \t pactl load-module module-null-sink\n\
+             Then restart NetShare. On Ubuntu 24.04 with PipeWire this \
+             should exist automatically."
         );
-        return host.default_input_device();
+        return None;
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
