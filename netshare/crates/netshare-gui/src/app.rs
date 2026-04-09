@@ -390,16 +390,16 @@ impl NetShareApp {
                 ui.add_space(6.0);
                 if let Some(handle) = &self.services.server {
                     let mut muted = handle.is_mic_muted();
-                    if ui.checkbox(&mut muted, "🎙 Mute my microphone (prevent echo)")
+                    if ui.checkbox(&mut muted, "🔇 Mute desktop audio sharing")
                         .changed()
                     {
                         handle.set_mic_muted(muted);
-                        log_info(if muted { "Mic muted" } else { "Mic unmuted" });
+                        log_info(if muted { "Desktop audio muted" } else { "Desktop audio unmuted" });
                     }
                     ui.label(
                         RichText::new(
-                            "Tip: if you hear your own voice echoed, mute this machine's \
-                             mic or use headphones.",
+                            "Streams this machine's speaker output to the other device. \
+                             On Linux: requires a PulseAudio/PipeWire monitor source.",
                         ).small().color(Color32::GRAY),
                     );
                 }

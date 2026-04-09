@@ -1,14 +1,18 @@
-/// Audio capture: CPAL microphone input → Opus encode → UDP → active client.
+/// Desktop audio capture (loopback) → Opus encode → UDP → active client.
 ///
-/// Uses the default INPUT device (microphone), NOT speaker loopback.
-/// Loopback would echo back anything the server is playing from the client,
-/// creating a feedback loop.  Mic input avoids this at the software level.
+/// Platform strategy:
+///   Windows : WASAPI loopback — build an input stream on the default OUTPUT device.
+///             This captures everything playing through the speakers.
+///   Linux   : PulseAudio/PipeWire monitor source — enumerate input devices and pick
+///             the first one whose name contains "monitor" (e.g.
+///             "Monitor of Built-in Audio Analog Stereo").  Falls back to default
+///             input if no monitor source is found.
 ///
 /// Architecture
-/// ┌─────────────────────────┐
-/// │  CPAL mic input callback │  (OS audio thread)
-/// │  accumulate → 960 f32   │
-/// └────────┬────────────────┘
+/// ┌────────────────────────────────┐
+/// │  CPAL loopback callback        │  (OS audio thread)
+/// │  accumulate → 960 f32 frames   │
+/// └────────┬───────────────────────┘
 ///          │ std::sync::mpsc
 ///          ▼
 /// ┌────────────────────────────┐
@@ -16,9 +20,9 @@
 /// └────────┬───────────────────┘
 ///          │ tokio::sync::mpsc
 ///          ▼
-/// ┌─────────────────────────────────────────────────────────────┐
-/// │  tokio encode task: Opus encode → UdpSocket.send_to(target) │
-/// └─────────────────────────────────────────────────────────────┘
+/// ┌──────────────────────────────────────────────────────────────────┐
+/// │  tokio encode task: Opus encode → UdpSocket.send_to(target_ip)   │
+/// └──────────────────────────────────────────────────────────────────┘
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -38,79 +42,83 @@ pub fn start(
     let (sync_tx, sync_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(8);
     let (async_tx, mut async_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
 
-    // ── CPAL mic capture thread ────────────────────────────────────────────
+    // ── CPAL loopback capture thread ───────────────────────────────────────
     std::thread::spawn(move || {
-        // Catch any CPAL panic so it doesn't kill the whole process.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let host = cpal::default_host();
+            let host = cpal::default_host();
 
-        // Use the default INPUT device (real microphone), not speaker loopback.
-        let device = match host.default_input_device() {
-            Some(d) => d,
-            None    => { warn!("no input device — mic capture disabled"); return; }
-        };
-        info!("Mic capture device: {}", device.name().unwrap_or_default());
-
-        let config = cpal::StreamConfig {
-            channels:    CHANNELS,
-            sample_rate: cpal::SampleRate(SAMPLE_RATE),
-            buffer_size: cpal::BufferSize::Default,
-        };
-
-        // Accumulate samples until we have a full Opus frame.
-        let mut buf: Vec<f32> = Vec::with_capacity(FRAME_INTERLEAVED * 2);
-
-        let stream = device.build_input_stream(
-            &config,
-            move |data: &[f32], _| {
-                buf.extend_from_slice(data);
-                while buf.len() >= FRAME_INTERLEAVED {
-                    let frame: Vec<f32> = buf.drain(..FRAME_INTERLEAVED).collect();
-                    sync_tx.try_send(frame).ok(); // drop if full (backpressure)
+            // Pick the best loopback device for this platform.
+            let device = match find_loopback_device(&host) {
+                Some(d) => d,
+                None => {
+                    warn!("No loopback/monitor device found — desktop audio capture disabled.");
+                    return;
                 }
-            },
-            |e| warn!("mic stream error: {e}"),
-            None,
-        );
+            };
+            info!("Desktop audio capture device: {}", device.name().unwrap_or_default());
 
-        match stream {
-            Ok(s) => {
-                s.play().ok();
-                // Keep the stream (and thread) alive.
-                loop { std::thread::park(); }
+            let config = cpal::StreamConfig {
+                channels:    CHANNELS,
+                sample_rate: cpal::SampleRate(SAMPLE_RATE),
+                buffer_size: cpal::BufferSize::Default,
+            };
+
+            let mut buf: Vec<f32> = Vec::with_capacity(FRAME_INTERLEAVED * 2);
+
+            let stream = device.build_input_stream(
+                &config,
+                move |data: &[f32], _| {
+                    buf.extend_from_slice(data);
+                    while buf.len() >= FRAME_INTERLEAVED {
+                        let frame: Vec<f32> = buf.drain(..FRAME_INTERLEAVED).collect();
+                        sync_tx.try_send(frame).ok();
+                    }
+                },
+                |e| warn!("loopback stream error: {e}"),
+                None,
+            );
+
+            match stream {
+                Ok(s) => {
+                    s.play().ok();
+                    loop { std::thread::park(); }
+                }
+                Err(e) => warn!("Failed to open loopback stream: {e}"),
             }
-            Err(e) => warn!("failed to open mic stream: {e}"),
-        }
-        })); // end catch_unwind closure
-        if let Err(_) = result {
-            warn!("Mic capture thread panicked — mic disabled");
+        }));
+        if result.is_err() {
+            warn!("Desktop audio capture thread panicked — audio sharing disabled.");
         }
     });
 
-    // ── Bridge thread: blocking mpsc → tokio channel ───────────────────────
+    // ── Bridge thread: blocking mpsc → tokio ──────────────────────────────
     std::thread::spawn(move || {
         for frame in sync_rx {
             if async_tx.send(frame).is_err() { break; }
         }
     });
 
-    // ── Tokio encode + send task ───────────────────────────────────────────
+    // ── Tokio encode + UDP send task ──────────────────────────────────────
     tokio::spawn(async move {
         let socket = match UdpSocket::bind("0.0.0.0:0").await {
             Ok(s) => s,
-            Err(e) => { warn!("mic UDP socket error: {e}"); return; }
+            Err(e) => { warn!("audio UDP socket error: {e}"); return; }
         };
 
-        let mut encoder = match opus::Encoder::new(SAMPLE_RATE, opus::Channels::Stereo, opus::Application::Voip) {
+        // Use Opus `Audio` application (better for music/desktop sounds vs Voip).
+        let mut encoder = match opus::Encoder::new(
+            SAMPLE_RATE,
+            opus::Channels::Stereo,
+            opus::Application::Audio,
+        ) {
             Ok(e) => e,
             Err(e) => { warn!("Opus encoder init failed: {e}"); return; }
         };
         encoder.set_bitrate(opus::Bitrate::Bits(128_000)).ok();
 
-        let mut out_buf = vec![0u8; 4000]; // max Opus packet size
+        let mut out_buf = vec![0u8; 4000];
 
         while let Some(pcm) = async_rx.recv().await {
-            // Drop frame if mic is muted.
             if muted.load(Ordering::Relaxed) { continue; }
 
             let target = *mic_target.lock().unwrap();
@@ -124,4 +132,61 @@ pub fn start(
     });
 
     Ok(())
+}
+
+// ── Platform-specific loopback device selection ────────────────────────────────
+
+/// Returns the best device for capturing desktop (loopback) audio.
+///
+/// * **Windows** – WASAPI exposes the default *output* device as a loopback
+///   source when you call `build_input_stream` on it. We return the default
+///   output device so CPAL/WASAPI will do the right thing.
+///
+/// * **Linux** – PulseAudio and PipeWire expose monitor sources as regular
+///   input devices. Their names contain "monitor" (case-insensitive). We pick
+///   the first matching device; if none exists we fall back to the default
+///   input (microphone) so audio is at least partially functional.
+fn find_loopback_device(host: &cpal::Host) -> Option<cpal::Device> {
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, WASAPI loopback = build_input_stream on an output device.
+        // Use the default output device so we capture whatever the user hears.
+        let dev = host.default_output_device();
+        if dev.is_none() {
+            warn!("No default output device for WASAPI loopback.");
+        }
+        return dev;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // PulseAudio/PipeWire: monitor sources appear in the input device list
+        // with "monitor" in their name.
+        let devices = match host.input_devices() {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("Failed to enumerate input devices: {e}");
+                return host.default_input_device();
+            }
+        };
+
+        for dev in devices {
+            let name = dev.name().unwrap_or_default().to_lowercase();
+            if name.contains("monitor") {
+                info!("Found PulseAudio/PipeWire monitor source: {}", dev.name().unwrap_or_default());
+                return Some(dev);
+            }
+        }
+
+        // No monitor source found — fall back to mic.
+        warn!(
+            "No PulseAudio/PipeWire monitor source found. \
+             To enable desktop audio on Linux, run: \
+             pactl load-module module-loopback"
+        );
+        return host.default_input_device();
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    host.default_input_device()
 }
