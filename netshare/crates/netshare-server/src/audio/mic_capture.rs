@@ -165,34 +165,64 @@ fn find_loopback_device(host: &cpal::Host) -> Option<cpal::Device> {
 
     #[cfg(target_os = "linux")]
     {
-        // PulseAudio/PipeWire exposes desktop audio as a monitor source —
-        // an input device whose name contains "monitor".
-        // We NEVER fall back to a real microphone here: the user wants
-        // desktop audio only, not mic audio.
-        let devices = match host.input_devices() {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("Failed to enumerate input devices: {e}");
-                return None;
-            }
-        };
+        // CPAL uses the ALSA backend which does NOT enumerate PipeWire/PulseAudio
+        // sources directly.  Instead, we ask pactl for the default sink's monitor
+        // source name and open it via ALSA's pulse plugin using the PULSE_SOURCE
+        // environment variable, then look for the "pulse" ALSA device.
+        //
+        // Strategy:
+        //  1. Run `pactl get-default-sink` → e.g. "alsa_output.pci-...analog-stereo"
+        //  2. Monitor source = sink + ".monitor"
+        //  3. Set PULSE_SOURCE env var so the "pulse" ALSA device uses that source
+        //  4. Find the ALSA device named "pulse" or "pipewire" in input devices
 
-        for dev in devices {
-            let name = dev.name().unwrap_or_default();
-            if name.to_lowercase().contains("monitor") {
-                info!("Found desktop audio monitor source: {name}");
-                return Some(dev);
+        // Step 1: get default sink name
+        if let Ok(out) = std::process::Command::new("pactl")
+            .arg("get-default-sink")
+            .output()
+        {
+            let sink = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if !sink.is_empty() {
+                let monitor = format!("{sink}.monitor");
+                info!("Using PipeWire/PulseAudio monitor source: {monitor}");
+                // Tell the pulse ALSA plugin to use this specific source.
+                std::env::set_var("PULSE_SOURCE", &monitor);
             }
         }
 
-        // No monitor source found — disable audio capture entirely.
-        // Do NOT fall back to microphone (would send wrong audio).
+        // Step 2: find the "pulse" or "pipewire" ALSA input device,
+        // which will now route through the monitor we just set.
+        let devices = match host.input_devices() {
+            Ok(d) => d,
+            Err(e) => { warn!("Failed to enumerate input devices: {e}"); return None; }
+        };
+
+        let mut fallback: Option<cpal::Device> = None;
+        for dev in devices {
+            let name = dev.name().unwrap_or_default();
+            let lower = name.to_lowercase();
+            if lower == "pulse" || lower == "pipewire" {
+                info!("Desktop audio capture via: {name}");
+                return Some(dev);
+            }
+            if lower.contains("monitor") {
+                info!("Found monitor source: {name}");
+                return Some(dev);
+            }
+            // Keep "default" as last-resort fallback (after setting PULSE_SOURCE).
+            if lower == "default" {
+                fallback = Some(dev);
+            }
+        }
+
+        if let Some(dev) = fallback {
+            info!("Using 'default' ALSA device with PULSE_SOURCE override for desktop audio");
+            return Some(dev);
+        }
+
         warn!(
-            "No PulseAudio/PipeWire monitor source found — desktop audio disabled.\n\
-             Fix: open pavucontrol, or run:\n\
-             \t pactl load-module module-null-sink\n\
-             Then restart NetShare. On Ubuntu 24.04 with PipeWire this \
-             should exist automatically."
+            "Could not find PipeWire/PulseAudio capture device.\n\
+             Make sure pipewire-pulse is running: systemctl --user status pipewire-pulse"
         );
         return None;
     }

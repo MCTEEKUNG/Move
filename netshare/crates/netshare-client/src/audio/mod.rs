@@ -78,18 +78,36 @@ fn find_loopback_input(host: &cpal::Host) -> Option<cpal::Device> {
 
     #[cfg(target_os = "linux")]
     {
-        // PulseAudio/PipeWire exposes speaker output as a monitor input source.
-        // Never fall back to mic — that would send the wrong audio.
-        let dev = host.input_devices().ok()?.find(|d| {
-            d.name().map(|n| n.to_lowercase().contains("monitor")).unwrap_or(false)
-        });
-        if dev.is_none() {
-            tracing::warn!(
-                "No PulseAudio/PipeWire monitor source found — desktop audio capture disabled.\n\
-                 To fix, open 'pavucontrol' or run: pactl load-module module-null-sink"
-            );
+        // Same strategy as server-side: set PULSE_SOURCE to the default sink's
+        // monitor, then open the "pulse" or "pipewire" ALSA device.
+        if let Ok(out) = std::process::Command::new("pactl")
+            .arg("get-default-sink")
+            .output()
+        {
+            let sink = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if !sink.is_empty() {
+                let monitor = format!("{sink}.monitor");
+                tracing::info!("Client audio: using monitor source {monitor}");
+                std::env::set_var("PULSE_SOURCE", &monitor);
+            }
         }
-        return dev;
+
+        let mut fallback: Option<cpal::Device> = None;
+        for dev in host.input_devices().ok()?.collect::<Vec<_>>() {
+            let name = dev.name().unwrap_or_default();
+            let lower = name.to_lowercase();
+            if lower == "pulse" || lower == "pipewire" || lower.contains("monitor") {
+                return Some(dev);
+            }
+            if lower == "default" { fallback = Some(dev); }
+        }
+
+        if fallback.is_some() {
+            tracing::info!("Client audio: using 'default' device with PULSE_SOURCE override");
+        } else {
+            tracing::warn!("No loopback/monitor device found — desktop audio capture disabled");
+        }
+        return fallback;
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]

@@ -314,39 +314,38 @@ impl NetShareApp {
                     }
                 }
 
-                // Draw Clients
+                // Draw Clients — show even if placement hasn't saved yet (use default).
                 for (slot, name) in clients {
-                    if let Some(p) = layout.placements.get(&slot) {
-                        // Calculate proportional size for client box
-                        // Use a base scale relative to the server's primary monitor
-                        let rel_w = (p.client_width as f32 / layout.server_width.max(1) as f32) * 160.0;
-                        let rel_h = (p.client_height as f32 / layout.server_height.max(1) as f32) * 100.0;
-                        
-                        // Clamp size so it doesn't get too small or too huge on canvas
-                        let size = egui::vec2(rel_w.clamp(80.0, 200.0), rel_h.clamp(50.0, 120.0));
-                        
-                        let center = placed_center(p.edge, size, srv_anchor);
-                        let rect = egui::Rect::from_center_size(center, size);
-                        
-                        // Glassmorphic Client Box
-                        painter.rect(rect, 6.0, Color32::from_rgba_premultiplied(0, 180, 200, 30), Stroke::new(1.5, Color32::from_rgb(0, 218, 243)));
-                        
-                        // Real Ping from network handle
-                        let ping = pings.get(&slot).copied().unwrap_or(0);
-                        
-                        painter.text(rect.center() - egui::vec2(0.0, 15.0), egui::Align2::CENTER_CENTER, name, egui::FontId::proportional(12.0), Color32::WHITE);
-                        painter.text(rect.center() + egui::vec2(0.0, 3.0), egui::Align2::CENTER_CENTER, format!("{}×{}", p.client_width, p.client_height), egui::FontId::proportional(9.0), Color32::from_gray(150));
-                        painter.text(rect.center() + egui::vec2(0.0, 20.0), egui::Align2::CENTER_CENTER, format!("{} ms", ping), egui::FontId::proportional(10.0), Color32::from_rgb(0, 218, 243));
-                        
-                        // Connection line
-                        let (p1, p2) = match p.edge {
-                            ClientEdge::Right => (srv_anchor.right_center(), rect.left_center()),
-                            ClientEdge::Left  => (srv_anchor.left_center(), rect.right_center()),
-                            ClientEdge::Below => (srv_anchor.center_bottom(), rect.center_top()),
-                            ClientEdge::Above => (srv_anchor.center_top(), rect.center_bottom()),
-                        };
-                        painter.line_segment([p1, p2], Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 218, 243, 80)));
-                    }
+                    use netshare_core::layout::{ClientEdge, Placement};
+                    let default_placement = Placement {
+                        edge: ClientEdge::Right,
+                        client_width: 1920,
+                        client_height: 1080,
+                    };
+                    let p = layout.placements.get(&slot).unwrap_or(&default_placement);
+
+                    let rel_w = (p.client_width as f32 / layout.server_width.max(1) as f32) * 160.0;
+                    let rel_h = (p.client_height as f32 / layout.server_height.max(1) as f32) * 100.0;
+                    let size = egui::vec2(rel_w.clamp(80.0, 200.0), rel_h.clamp(50.0, 120.0));
+
+                    let center = placed_center(p.edge, size, srv_anchor);
+                    let rect = egui::Rect::from_center_size(center, size);
+
+                    // Glassmorphic Client Box
+                    painter.rect(rect, 6.0, Color32::from_rgba_premultiplied(0, 180, 200, 30), Stroke::new(1.5, Color32::from_rgb(0, 218, 243)));
+
+                    let ping = pings.get(&slot).copied().unwrap_or(0);
+                    painter.text(rect.center() - egui::vec2(0.0, 15.0), egui::Align2::CENTER_CENTER, &name, egui::FontId::proportional(12.0), Color32::WHITE);
+                    painter.text(rect.center() + egui::vec2(0.0, 3.0),  egui::Align2::CENTER_CENTER, format!("{}×{}", p.client_width, p.client_height), egui::FontId::proportional(9.0), Color32::from_gray(150));
+                    painter.text(rect.center() + egui::vec2(0.0, 20.0), egui::Align2::CENTER_CENTER, format!("{} ms", ping), egui::FontId::proportional(10.0), Color32::from_rgb(0, 218, 243));
+
+                    let (p1, p2) = match p.edge {
+                        ClientEdge::Right => (srv_anchor.right_center(),  rect.left_center()),
+                        ClientEdge::Left  => (srv_anchor.left_center(),   rect.right_center()),
+                        ClientEdge::Below => (srv_anchor.center_bottom(), rect.center_top()),
+                        ClientEdge::Above => (srv_anchor.center_top(),    rect.center_bottom()),
+                    };
+                    painter.line_segment([p1, p2], Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 218, 243, 80)));
                 }
             } else {
                 ui.centered_and_justified(|ui| {
