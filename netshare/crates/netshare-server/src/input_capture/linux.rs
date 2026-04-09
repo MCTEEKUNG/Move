@@ -18,13 +18,20 @@ use super::{CaptureEvent, SharedSeamlessState};
 
 pub(super) fn run_evdev(
     tx: mpsc::UnboundedSender<CaptureEvent>,
-    _seamless: SharedSeamlessState,
+    seamless: SharedSeamlessState,
 ) {
     let devices: Vec<_> = evdev::enumerate().collect();
 
     if devices.is_empty() {
         warn!("No evdev devices found. Make sure user is in 'input' group: sudo usermod -aG input $USER");
         return;
+    }
+
+    // Spawn the x11rb seamless cursor watcher (edge detection + cursor lock).
+    {
+        let tx_s = tx.clone();
+        let sem  = seamless.clone();
+        std::thread::spawn(move || seamless_watcher(tx_s, sem));
     }
 
     let mut spawned = 0usize;
@@ -40,10 +47,11 @@ pub(super) fn run_evdev(
 
         let name = device.name().unwrap_or("unknown").to_owned();
         info!("Capturing input device: {} ({:?})", name, path);
-        let tx_clone = tx.clone();
+        let tx_clone   = tx.clone();
+        let sem_clone  = seamless.clone();
 
         std::thread::spawn(move || {
-            read_device_loop(device, is_mouse, is_keyboard, tx_clone);
+            read_device_loop(device, is_mouse, is_keyboard, tx_clone, sem_clone);
         });
         spawned += 1;
     }
@@ -55,11 +63,95 @@ pub(super) fn run_evdev(
     }
 }
 
+/// Poll the X11 cursor position every 8 ms.
+///
+/// * When **not locked**: check if cursor is at a configured edge → fire
+///   `EdgeEnter`, update seamless state, warp cursor to lock pixel.
+/// * When **locked**: keep warping the cursor back to the lock pixel so the
+///   system cursor stays pinned at the edge while input flows to the client.
+fn seamless_watcher(tx: mpsc::UnboundedSender<CaptureEvent>, seamless: SharedSeamlessState) {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::ConnectionExt;
+    use netshare_core::layout::ClientEdge;
+
+    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+        warn!("x11rb: cannot connect to X11 display — seamless cursor crossing disabled");
+        return;
+    };
+    let root = conn.setup().roots[screen_num].root;
+    info!("Seamless cursor watcher started (x11rb)");
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(8));
+
+        // Query current absolute cursor position.
+        let Ok(cookie) = conn.query_pointer(root) else { continue };
+        let Ok(reply)  = cookie.reply()            else { continue };
+        let cx = reply.root_x as i32;
+        let cy = reply.root_y as i32;
+
+        let mut state = seamless.lock().unwrap();
+
+        if let Some(_slot) = state.locked_to_slot {
+            // Already locked — keep warping back to the lock pixel.
+            let (lx, ly) = (state.lock_x, state.lock_y);
+            drop(state);
+            if cx != lx || cy != ly {
+                conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, lx as i16, ly as i16).ok();
+                conn.flush().ok();
+            }
+            continue;
+        }
+
+        // Not locked — check if cursor is at a configured edge.
+        let layout = &state.layout;
+        if layout.server_width == 0 || layout.placements.is_empty() {
+            continue;
+        }
+        let (vx_min, vy_min, vx_max, vy_max) = layout.server_bounds();
+
+        let found: Option<(u8, ClientEdge, i32, i32)> =
+            layout.placements.iter().find_map(|(&slot, placement)| {
+                let on_edge = match placement.edge {
+                    ClientEdge::Right  => cx >= vx_max - 1,
+                    ClientEdge::Left   => cx <= vx_min,
+                    ClientEdge::Below  => cy >= vy_max - 1,
+                    ClientEdge::Above  => cy <= vy_min,
+                };
+                if !on_edge { return None; }
+                let (lx, ly) = match placement.edge {
+                    ClientEdge::Right  => (vx_max - 1, cy.clamp(vy_min, vy_max - 1)),
+                    ClientEdge::Left   => (vx_min,     cy.clamp(vy_min, vy_max - 1)),
+                    ClientEdge::Below  => (cx.clamp(vx_min, vx_max - 1), vy_max - 1),
+                    ClientEdge::Above  => (cx.clamp(vx_min, vx_max - 1), vy_min),
+                };
+                Some((slot, placement.edge, lx, ly))
+            });
+
+        if let Some((slot, server_edge, lx, ly)) = found {
+            let entry = layout.entry_pos(slot, cx, cy);
+            state.locked_to_slot = Some(slot);
+            state.lock_x = lx;
+            state.lock_y = ly;
+            drop(state);
+
+            // Warp cursor to lock pixel.
+            conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, lx as i16, ly as i16).ok();
+            conn.flush().ok();
+
+            let (entry_x, entry_y) = entry.unwrap_or((0, 0));
+            let _ = tx.send(CaptureEvent::EdgeEnter { slot, entry_x, entry_y, server_edge });
+            info!("EdgeEnter → slot {slot} at ({entry_x},{entry_y}) via {:?}", server_edge);
+        }
+    }
+}
+
 fn read_device_loop(
     mut device: evdev::Device,
     is_mouse: bool,
     is_keyboard: bool,
     tx: mpsc::UnboundedSender<CaptureEvent>,
+    seamless: SharedSeamlessState,
 ) {
     loop {
         let events = match device.fetch_events() {
@@ -70,16 +162,28 @@ fn read_device_loop(
             }
         };
 
+        let locked = seamless.lock().unwrap().locked_to_slot;
+
         for ev in events {
             let pkt: Option<ControlPacket> = match ev.kind() {
                 evdev::InputEventKind::RelAxis(axis) if is_mouse => {
-                    handle_rel_axis(axis, ev.value())
+                    // When locked, forward mouse deltas to client.
+                    // When unlocked, skip — no active client to route to.
+                    if locked.is_some() {
+                        handle_rel_axis(axis, ev.value())
+                    } else {
+                        None
+                    }
                 }
                 evdev::InputEventKind::Key(key) if is_keyboard => {
                     handle_keyboard_key(key, ev.value())
                 }
                 evdev::InputEventKind::Key(key) if is_mouse => {
-                    handle_mouse_button(key, ev.value())
+                    if locked.is_some() {
+                        handle_mouse_button(key, ev.value())
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             };
