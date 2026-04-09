@@ -5,6 +5,10 @@ mod tray;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> anyhow::Result<()> {
+    // GTK must be initialised before tray-icon creates any menus (Linux only).
+    #[cfg(target_os = "linux")]
+    gtk::init().expect("Failed to initialise GTK");
+
     // Install rustls crypto provider (ring) as the process-level default.
     // Must be called before any TLS code runs.
     rustls::crypto::ring::default_provider()
