@@ -219,29 +219,32 @@ fn set_cursor_pos(x: i32, y: i32) {
 
 #[cfg(target_os = "linux")]
 fn get_screen_width() -> i32 {
+    use x11rb::connection::Connection;
     let Ok((conn, screen_num)) = x11rb::connect(None) else { return 1920 };
-    let setup = conn.setup();
-    setup.roots[screen_num].width_in_pixels as i32
+    conn.setup().roots[screen_num].width_in_pixels as i32
 }
 
 #[cfg(target_os = "linux")]
 fn get_screen_height() -> i32 {
+    use x11rb::connection::Connection;
     let Ok((conn, screen_num)) = x11rb::connect(None) else { return 1080 };
-    let setup = conn.setup();
-    setup.roots[screen_num].height_in_pixels as i32
+    conn.setup().roots[screen_num].height_in_pixels as i32
 }
 
 #[cfg(target_os = "linux")]
 fn get_cursor_pos() -> (i32, i32) {
+    use x11rb::connection::Connection;
     use x11rb::protocol::xproto::ConnectionExt;
     let Ok((conn, screen_num)) = x11rb::connect(None) else { return (0, 0) };
     let root = conn.setup().roots[screen_num].root;
-    let Ok(reply) = conn.query_pointer(root).and_then(|c| c.reply()) else { return (0, 0) };
+    let Ok(cookie) = conn.query_pointer(root) else { return (0, 0) };
+    let Ok(reply)  = cookie.reply() else { return (0, 0) };
     (reply.root_x as i32, reply.root_y as i32)
 }
 
 #[cfg(target_os = "linux")]
 fn set_cursor_pos(x: i32, y: i32) {
+    use x11rb::connection::Connection;
     use x11rb::protocol::xproto::ConnectionExt;
     let Ok((conn, screen_num)) = x11rb::connect(None) else { return };
     let root = conn.setup().roots[screen_num].root;

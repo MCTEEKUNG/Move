@@ -77,7 +77,7 @@ fn build_device() -> anyhow::Result<VirtualDevice> {
         Key::KEY_LEFTBRACE, Key::KEY_RIGHTBRACE,
         Key::KEY_SEMICOLON, Key::KEY_APOSTROPHE, Key::KEY_GRAVE,
         Key::KEY_COMMA, Key::KEY_DOT, Key::KEY_SLASH,
-        Key::KEY_PRINTSCREEN, Key::KEY_SCROLLLOCK, Key::KEY_PAUSE,
+        Key::KEY_SYSRQ, Key::KEY_SCROLLLOCK, Key::KEY_PAUSE,
         Key::KEY_NUMLOCK,
         Key::KEY_KP0,  Key::KEY_KP1,  Key::KEY_KP2,  Key::KEY_KP3,
         Key::KEY_KP4,  Key::KEY_KP5,  Key::KEY_KP6,  Key::KEY_KP7,
@@ -96,7 +96,7 @@ fn build_device() -> anyhow::Result<VirtualDevice> {
 }
 
 fn syn() -> InputEvent {
-    InputEvent::new(EventType::SYNCHRONIZE, 0, 0)
+    InputEvent::new(EventType::SYNCHRONIZATION, 0, 0)
 }
 
 // ── Public injection functions ────────────────────────────────────────────────
@@ -258,7 +258,7 @@ fn vk_to_linux(vk: u32) -> Option<Key> {
         0x14 => Key::KEY_CAPSLOCK,
         0x90 => Key::KEY_NUMLOCK,
         0x91 => Key::KEY_SCROLLLOCK,
-        0x2C => Key::KEY_PRINTSCREEN,
+        0x2C => Key::KEY_SYSRQ,
         0x13 => Key::KEY_PAUSE,
 
         // Punctuation / symbols (US layout)

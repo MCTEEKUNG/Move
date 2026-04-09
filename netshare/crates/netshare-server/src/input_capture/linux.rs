@@ -248,7 +248,7 @@ fn linux_to_vk(key: evdev::Key) -> Option<u32> {
         evdev::Key::KEY_LEFTMETA    => 0x5B,
         evdev::Key::KEY_RIGHTMETA   => 0x5C,
         evdev::Key::KEY_PAUSE       => 0x13,
-        evdev::Key::KEY_PRINTSCREEN => 0x2C,
+        evdev::Key::KEY_SYSRQ       => 0x2C,
         evdev::Key::KEY_KPENTER     => 0x0D,
         _ => return None,
     })
