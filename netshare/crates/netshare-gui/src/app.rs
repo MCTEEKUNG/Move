@@ -84,8 +84,6 @@ pub struct NetShareApp {
     window_visible: bool,
     rt:             tokio::runtime::Handle,
     layout_drag:    LayoutDragState,
-    /// True when the process has Administrator privileges (always true on Linux).
-    admin_ok:       bool,
 }
 
 impl NetShareApp {
@@ -106,7 +104,6 @@ impl NetShareApp {
             window_visible: true,
             rt,
             layout_drag: LayoutDragState::default(),
-            admin_ok: crate::windows_is_elevated(),
         };
 
         // AUTO-START: Start server immediately
@@ -690,35 +687,6 @@ impl NetShareApp {
         ui.add_space(12.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            // ── Administrator warning (Windows only) ───────────────────────
-            if !self.admin_ok {
-                egui::Frame::none()
-                    .fill(Color32::from_rgba_premultiplied(180, 100, 0, 40))
-                    .inner_margin(egui::Margin::same(10.0))
-                    .rounding(8.0)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("⚠  Not running as Administrator")
-                                .color(Color32::from_rgb(255, 200, 50)).strong());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("Restart as Administrator").clicked() {
-                                    if crate::windows_relaunch_elevated() {
-                                        std::process::exit(0);
-                                    }
-                                }
-                            });
-                        });
-                        ui.label(
-                            RichText::new(
-                                "Mouse and keyboard injection into elevated windows \
-                                 (Task Manager, UAC prompts) is blocked by Windows UIPI. \
-                                 Click the button above to restart with full permissions.",
-                            ).small().color(Color32::from_gray(180)),
-                        );
-                    });
-                ui.add_space(10.0);
-            }
-
             // ── Local machine ─────────────────────────────────────────────
             ui.group(|ui| {
                 ui.label(RichText::new("Local Machine").strong()
