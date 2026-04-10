@@ -71,19 +71,21 @@ struct AppServices {
 pub struct NetShareApp {
     services:      AppServices,
     active_page:   ActivePage,
-    
+
     // Config / Form State
     bind_addr:     String,
     client_name:   String,
     pairing_input: String,
     auto_connect:  bool,
-    
+
     // UI Helpers
     browser:        Option<MdnsBrowser>,
     tray:           Option<TrayHandle>,
     window_visible: bool,
     rt:             tokio::runtime::Handle,
     layout_drag:    LayoutDragState,
+    /// True when the process has Administrator privileges (always true on Linux).
+    admin_ok:       bool,
 }
 
 impl NetShareApp {
@@ -104,6 +106,7 @@ impl NetShareApp {
             window_visible: true,
             rt,
             layout_drag: LayoutDragState::default(),
+            admin_ok: crate::windows_is_elevated(),
         };
 
         // AUTO-START: Start server immediately
@@ -165,8 +168,23 @@ impl eframe::App for NetShareApp {
         if self.auto_connect && self.services.client.is_none() && (now - LAST_CONNECT_ATTEMPT.load(std::sync::atomic::Ordering::Relaxed) > 5) {
             let local_host = gethostname();
             if let Some(found) = self.browser.as_ref().and_then(|b| {
-                // Find first server that ISN'T us
-                b.servers.iter().find(|s| !s.name.contains(&local_host))
+                // Snapshot current client names to avoid holding the lock inside the closure.
+                let our_clients: Vec<String> = self.services.server.as_ref()
+                    .map(|srv| srv.clients().into_iter().map(|(_, n)| n).collect())
+                    .unwrap_or_default();
+                // Find first server that ISN'T us AND isn't already our client.
+                // Without this both machines auto-connect to each other, creating a
+                // bidirectional loop where each thinks it is the main machine.
+                b.servers.iter().find(|s| {
+                    if s.name.contains(&local_host) { return false; }
+                    // Skip if this machine is already connected to us as a client.
+                    let already_our_client = our_clients.iter().any(|cn| {
+                        let sn = s.name.to_lowercase();
+                        let cn = cn.to_lowercase();
+                        sn.contains(&cn) || cn.contains(&sn)
+                    });
+                    !already_our_client
+                })
             }) {
                 LAST_CONNECT_ATTEMPT.store(now, std::sync::atomic::Ordering::Relaxed);
                 let addr = format!("{}:{}", found.addr, found.port);
@@ -341,6 +359,27 @@ impl NetShareApp {
         });
         ui.label(RichText::new("Drag a screen to reposition it  —  changes apply immediately").small().color(Color32::GRAY));
         ui.add_space(10.0);
+
+        // ── Secondary screen view ──────────────────────────────────────────
+        // When this machine is purely acting as a remote display for another
+        // machine (client connected, no clients on our own server), show a
+        // simplified view that makes the actual topology clear.
+        {
+            use netshare_client::ConnectionStatus;
+            let client_connected = self.services.client.as_ref().map_or(false, |c| {
+                matches!(
+                    c.state.lock().unwrap_or_else(|e| e.into_inner()).status,
+                    ConnectionStatus::Connected
+                )
+            });
+            let local_client_count = self.services.server.as_ref()
+                .map_or(0, |s| s.clients().len());
+
+            if client_connected && local_client_count == 0 {
+                self.render_secondary_screen_dashboard(ui);
+                return;
+            }
+        }
 
         let Some(handle) = &mut self.services.server else {
             ui.centered_and_justified(|ui| {
@@ -543,11 +582,143 @@ impl NetShareApp {
         }
     }
 
+    fn render_secondary_screen_dashboard(&mut self, ui: &mut egui::Ui) {
+        let (server_name, return_edge, sw, sh) = match &self.services.client {
+            Some(c) => {
+                let s = c.state.lock().unwrap_or_else(|e| e.into_inner());
+                (s.server_name.clone(), s.return_edge, s.screen_width, s.screen_height)
+            }
+            None => return,
+        };
+
+        // ── Header ────────────────────────────────────────────────────────
+        ui.horizontal(|ui| {
+            ui.heading(RichText::new("System Topology").strong().color(Color32::WHITE));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new("● Secondary Screen").color(Color32::from_rgb(80, 220, 100)).strong());
+            });
+        });
+        ui.label(
+            RichText::new(format!("This machine is a remote display for  {server_name}  (the main machine)"))
+                .small().color(Color32::GRAY),
+        );
+        ui.add_space(10.0);
+
+        // ── Canvas ────────────────────────────────────────────────────────
+        let canvas_size = egui::vec2(ui.available_width(), 280.0);
+        let (canvas_rect, _) = ui.allocate_exact_size(canvas_size, Sense::hover());
+        let painter = ui.painter_at(canvas_rect);
+
+        painter.rect_filled(canvas_rect, 12.0, Color32::from_rgb(20, 22, 26));
+        painter.rect_stroke(canvas_rect, 12.0, Stroke::new(1.0, Color32::from_rgb(40, 42, 48)));
+
+        let center = canvas_rect.center();
+        let srv_sz = egui::vec2(150.0, 92.0);
+        let cli_sz = egui::vec2(120.0, 72.0);
+        let gap    = 90.0_f32;
+
+        // Position server box and client box based on return_edge.
+        // return_edge is the edge of THIS machine leading back to the server.
+        let (srv_center, cli_center) = match return_edge {
+            Some(ClientEdge::Left) | None => (
+                egui::pos2(center.x - gap - srv_sz.x / 2.0, center.y),
+                egui::pos2(center.x + gap / 2.0,            center.y),
+            ),
+            Some(ClientEdge::Right) => (
+                egui::pos2(center.x + gap + srv_sz.x / 2.0, center.y),
+                egui::pos2(center.x - gap / 2.0,            center.y),
+            ),
+            Some(ClientEdge::Above) => (
+                egui::pos2(center.x, center.y - gap - srv_sz.y / 2.0),
+                egui::pos2(center.x, center.y + gap / 2.0),
+            ),
+            Some(ClientEdge::Below) => (
+                egui::pos2(center.x, center.y + gap + srv_sz.y / 2.0),
+                egui::pos2(center.x, center.y - gap / 2.0),
+            ),
+        };
+
+        let srv_rect = egui::Rect::from_center_size(srv_center, srv_sz);
+        let cli_rect = egui::Rect::from_center_size(cli_center, cli_sz);
+
+        // Connector
+        let (p1, p2) = match return_edge {
+            Some(ClientEdge::Left) | None =>
+                (srv_rect.right_center(), cli_rect.left_center()),
+            Some(ClientEdge::Right) =>
+                (srv_rect.left_center(),  cli_rect.right_center()),
+            Some(ClientEdge::Above) =>
+                (srv_rect.center_bottom(), cli_rect.center_top()),
+            Some(ClientEdge::Below) =>
+                (srv_rect.center_top(),   cli_rect.center_bottom()),
+        };
+        painter.line_segment([p1, p2], Stroke::new(1.5, Color32::from_rgba_premultiplied(0, 218, 243, 90)));
+
+        // Server box (main machine)
+        painter.rect(srv_rect, 6.0, Color32::from_rgb(0, 40, 80), Stroke::new(2.0, Color32::from_rgb(0, 218, 243)));
+        painter.text(srv_rect.center() - egui::vec2(0.0, 10.0), egui::Align2::CENTER_CENTER,
+            &server_name, egui::FontId::proportional(12.0), Color32::WHITE);
+        painter.text(srv_rect.center() + egui::vec2(0.0, 8.0), egui::Align2::CENTER_CENTER,
+            "MAIN MACHINE", egui::FontId::proportional(9.0), Color32::from_rgb(0, 218, 243));
+
+        // This machine box (secondary screen)
+        painter.rect(cli_rect, 6.0,
+            Color32::from_rgba_premultiplied(0, 218, 243, 25),
+            Stroke::new(2.0, Color32::from_rgb(0, 180, 200)));
+        painter.text(cli_rect.center() - egui::vec2(0.0, 10.0), egui::Align2::CENTER_CENTER,
+            &gethostname(), egui::FontId::proportional(12.0), Color32::WHITE);
+        painter.text(cli_rect.center() + egui::vec2(0.0, 8.0), egui::Align2::CENTER_CENTER,
+            format!("{}×{}", sw, sh), egui::FontId::proportional(9.0), Color32::from_gray(150));
+
+        // Direction hint
+        let hint = match return_edge {
+            Some(ClientEdge::Left)  => "← Move cursor left to return to main machine",
+            Some(ClientEdge::Right) => "Move cursor right to return to main machine →",
+            Some(ClientEdge::Above) => "↑ Move cursor up to return to main machine",
+            Some(ClientEdge::Below) => "Move cursor down to return to main machine ↓",
+            None                    => "Waiting for cursor handoff from main machine...",
+        };
+        painter.text(
+            canvas_rect.center_bottom() - egui::vec2(0.0, 14.0),
+            egui::Align2::CENTER_CENTER, hint,
+            egui::FontId::proportional(11.0), Color32::from_gray(110),
+        );
+    }
+
     fn render_settings(&mut self, ui: &mut egui::Ui) {
         ui.heading("System Configuration");
         ui.add_space(12.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
+            // ── Administrator warning (Windows only) ───────────────────────
+            if !self.admin_ok {
+                egui::Frame::none()
+                    .fill(Color32::from_rgba_premultiplied(180, 100, 0, 40))
+                    .inner_margin(egui::Margin::same(10.0))
+                    .rounding(8.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("⚠  Not running as Administrator")
+                                .color(Color32::from_rgb(255, 200, 50)).strong());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("Restart as Administrator").clicked() {
+                                    if crate::windows_relaunch_elevated() {
+                                        std::process::exit(0);
+                                    }
+                                }
+                            });
+                        });
+                        ui.label(
+                            RichText::new(
+                                "Mouse and keyboard injection into elevated windows \
+                                 (Task Manager, UAC prompts) is blocked by Windows UIPI. \
+                                 Click the button above to restart with full permissions.",
+                            ).small().color(Color32::from_gray(180)),
+                        );
+                    });
+                ui.add_space(10.0);
+            }
+
             // ── Local machine ─────────────────────────────────────────────
             ui.group(|ui| {
                 ui.label(RichText::new("Local Machine").strong()
