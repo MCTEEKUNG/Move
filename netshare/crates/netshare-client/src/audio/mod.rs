@@ -20,25 +20,23 @@ pub struct ClientAudio;
 impl ClientAudio {
     /// Start audio subsystems. Returns Ok even if audio is unavailable —
     /// individual failures are logged as warnings and skipped gracefully.
-    pub fn start(server_addr: SocketAddr) -> Result<Self> {
+    ///
+    /// # Audio direction
+    /// In KVM mode the correct audio direction is **server → client only**:
+    ///   Server captures its desktop audio and sends to the client.
+    ///   Client receives and plays back through its own speakers.
+    ///
+    /// The client does NOT send audio back to the server.  Doing so creates an
+    /// echo feedback loop:
+    ///   server → client plays → client's WASAPI loopback captures the playback
+    ///   → sends back to server → server plays through headphones → echo.
+    pub fn start(_server_addr: SocketAddr) -> Result<Self> {
         let host = cpal::default_host();
 
-        // Audio device capture (send this machine's desktop audio to server).
-        // Platform strategy:
-        //   Windows: prefer VB-Cable input, else WASAPI loopback via output device.
-        //   Linux:   look for PulseAudio/PipeWire monitor source (never use mic).
-        let capture_device = find_loopback_input(&host);
-
-        match capture_device {
-            Some(dev) => {
-                if let Err(e) = audio_capture::start(dev, server_addr) {
-                    tracing::warn!("System audio capture disabled: {e}");
-                }
-            }
-            None => tracing::warn!("No loopback/monitor device found — desktop audio capture disabled"),
-        }
-
-        // Playback device (received sound from server → this machine's speaker).
+        // ── Playback only (server audio → this machine's speakers) ───────────
+        // The client ONLY receives and plays audio from the server.
+        // It does NOT capture and send its own desktop audio — that is the
+        // server's role, controlled by the "Share desktop audio" checkbox.
         let playback_device = find_vbcable_output(&host)
             .or_else(|| host.default_output_device());
         match playback_device {

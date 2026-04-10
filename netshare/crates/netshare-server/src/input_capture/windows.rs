@@ -207,10 +207,16 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 
             if let Some((slot, lock_x, lock_y)) = locked_info {
                 // Locked to a client — forward delta, suppress, clamp back.
-                let _ = slot; // used for routing in the fan-out loop via InputPacket
+                let _ = slot;
                 send(CaptureEvent::InputPacket(ControlPacket::MouseMove(MouseMove { dx, dy })));
-                // Clamp back to lock position.
+                // Warp cursor back to the lock pixel.
                 let _ = SetCursorPos(lock_x, lock_y);
+                // CRITICAL: reset LAST_X/Y to the warped position.
+                // Without this, the next real event calculates dx from the
+                // pre-warp position, producing a large spurious negative delta
+                // that appears as a visible "jitter" on the client screen.
+                LAST_X.with(|c| c.set(lock_x));
+                LAST_Y.with(|c| c.set(lock_y));
                 return LRESULT(1);
             }
 
