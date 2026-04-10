@@ -148,6 +148,26 @@ pub fn inject_scroll(ev: MouseScroll) {
     dev.emit(&events).ok();
 }
 
+/// Synthesise key-up events for every modifier key.
+/// See Windows implementation for rationale.
+pub fn release_all_modifiers() {
+    let mod_keys = [
+        Key::KEY_LEFTSHIFT,  Key::KEY_RIGHTSHIFT,
+        Key::KEY_LEFTCTRL,   Key::KEY_RIGHTCTRL,
+        Key::KEY_LEFTALT,    Key::KEY_RIGHTALT,
+        Key::KEY_LEFTMETA,   Key::KEY_RIGHTMETA,
+    ];
+    let mut dev = match device().lock() {
+        Ok(d) => d,
+        Err(e) => e.into_inner(),
+    };
+    let mut events: Vec<InputEvent> = mod_keys.iter()
+        .map(|k| InputEvent::new(EventType::KEY, k.code(), 0)) // 0 = key-up
+        .collect();
+    events.push(syn());
+    dev.emit(&events).ok();
+}
+
 pub fn inject_key(ev: KeyEvent) {
     let Some(linux_key) = vk_to_linux(ev.vk) else { return };
     let value = match ev.action {

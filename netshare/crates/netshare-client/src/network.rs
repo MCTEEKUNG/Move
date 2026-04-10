@@ -103,6 +103,11 @@ pub async fn run_client(
     info!("Connected to '{}' — slot {}", resp.server_name, resp.assigned_slot);
 
     // ── Main receive loop ──────────────────────────────────────────────────
+    // Track the cursor-return watcher so we can abort the previous one when
+    // a new CursorEnter arrives (rapid edge-crossing would otherwise accumulate
+    // unbounded tasks, eventually causing OOM on 24/7 systems).
+    let mut return_task: Option<tokio::task::AbortHandle> = None;
+
     let result: anyhow::Result<()> = loop {
         let (_, pkt) = match read_packet(&mut reader).await {
             Ok(v) => v,
@@ -119,6 +124,15 @@ pub async fn run_client(
                 // Place cursor at the specified position.
                 set_cursor_pos(x, y);
 
+                // Release all modifier keys so the client starts with a clean
+                // key-state.  The server's hook only begins forwarding AFTER the
+                // edge crossing, so any modifiers already held at the moment of
+                // crossing (Win, Ctrl, Shift, Alt) were never sent here — leaving
+                // the client thinking no modifier is pressed, which breaks combos
+                // like Win+E or Ctrl+C.  The server will re-send key-down for any
+                // modifier still physically held on its next key event.
+                input_inject::release_all_modifiers();
+
                 // Use the return_edge from the packet; also store in gui state.
                 let (sw, sh) = {
                     let mut s = gui.lock().unwrap_or_else(|e| e.into_inner());
@@ -126,10 +140,17 @@ pub async fn run_client(
                     (s.screen_width, s.screen_height)
                 };
 
+                // Abort any previous watcher before spawning a new one.
+                // Without this, each edge-crossing spawns a permanent task → OOM.
+                if let Some(old) = return_task.take() {
+                    old.abort();
+                }
+
                 let writer_clone = writer.clone();
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     watch_for_return(return_edge, sw, sh, writer_clone).await;
                 });
+                return_task = Some(task.abort_handle());
             }
 
             ControlPacket::ActiveClientChange(change) => {
@@ -161,7 +182,22 @@ pub async fn run_client(
     result
 }
 
+/// Returns true when the cursor has reached the edge that leads back to the server.
+#[inline]
+fn at_return_edge(edge: ClientEdge, cx: i32, cy: i32, sw: i32, sh: i32) -> bool {
+    match edge {
+        ClientEdge::Left   => cx <= 0,
+        ClientEdge::Right  => cx >= sw.saturating_sub(1),
+        ClientEdge::Above  => cy <= 0,
+        ClientEdge::Below  => cy >= sh.saturating_sub(1),
+    }
+}
+
 /// Poll the cursor position until it hits the return edge, then send CursorReturn.
+///
+/// On Linux this function opens one X11 connection that is reused for every
+/// poll tick (previously a new connection was created every 8 ms — a severe
+/// resource leak on 24/7 systems).
 async fn watch_for_return<W>(
     edge: ClientEdge,
     screen_width: i32,
@@ -171,16 +207,41 @@ async fn watch_for_return<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    #[cfg(target_os = "linux")]
+    {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::ConnectionExt;
+
+        // Open a single connection for the entire lifetime of this task.
+        // Avoids the overhead of creating a new socket + auth handshake every 8 ms.
+        let Ok((conn, screen_num)) = x11rb::connect(None) else {
+            warn!("watch_for_return: cannot open X11 connection, falling back");
+            // fall through to generic path below
+            return;
+        };
+        let root = conn.setup().roots[screen_num].root;
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+            let Ok(cookie) = conn.query_pointer(root) else { break };
+            let Ok(reply)  = cookie.reply()            else { break };
+            if at_return_edge(edge, reply.root_x as i32, reply.root_y as i32,
+                              screen_width, screen_height)
+            {
+                let mut w = writer.lock().await;
+                let _ = write_packet(&mut *w, &ControlPacket::CursorReturn, 0).await;
+                break;
+            }
+        }
+        return;
+    }
+
+    // Windows / other: platform helpers are cheap per call (no new connection).
+    #[allow(unreachable_code)]
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(8)).await;
         let (cx, cy) = get_cursor_pos();
-        let at_return = match edge {
-            ClientEdge::Left   => cx <= 0,
-            ClientEdge::Right  => cx >= screen_width.saturating_sub(1),
-            ClientEdge::Above  => cy <= 0,
-            ClientEdge::Below  => cy >= screen_height.saturating_sub(1),
-        };
-        if at_return {
+        if at_return_edge(edge, cx, cy, screen_width, screen_height) {
             let mut w = writer.lock().await;
             let _ = write_packet(&mut *w, &ControlPacket::CursorReturn, 0).await;
             break;

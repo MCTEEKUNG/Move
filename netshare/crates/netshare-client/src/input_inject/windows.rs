@@ -113,6 +113,39 @@ pub fn inject_key(ev: KeyEvent) {
     send(&[input]);
 }
 
+/// Synthesise key-up events for every modifier key.
+///
+/// Called on CursorEnter: the server's hook began capturing AFTER the cursor
+/// crossed the edge, so any modifiers already held on the server at that
+/// moment were never forwarded — leaving the client in a "stuck key" state.
+/// Releasing all modifiers here gives the client a clean slate; the server
+/// will re-send key-down events as the user continues to hold or press keys.
+pub fn release_all_modifiers() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL,
+        VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN,
+    };
+    let vks = [
+        VK_LSHIFT, VK_RSHIFT,
+        VK_LCONTROL, VK_RCONTROL,
+        VK_LMENU, VK_RMENU,
+        VK_LWIN, VK_RWIN,
+    ];
+    let inputs: Vec<INPUT> = vks.iter().map(|vk| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: *vk,
+                wScan: 0,
+                dwFlags: KEYEVENTF_KEYUP,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }).collect();
+    send(&inputs);
+}
+
 fn send(inputs: &[INPUT]) {
     let sent = unsafe {
         SendInput(inputs, std::mem::size_of::<INPUT>() as i32)

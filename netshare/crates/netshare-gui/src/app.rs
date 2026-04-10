@@ -146,10 +146,22 @@ impl eframe::App for NetShareApp {
             }
         }
 
+        // ── Auto-reconnect: clear a disconnected client so the slot is free ────
+        // After the network task exits it sets status = Disconnected; the handle
+        // itself stays Some(…) forever unless we clear it here.  Without this
+        // auto-connect never retries after the first drop.
+        if let Some(client) = &self.services.client {
+            use netshare_client::ConnectionStatus;
+            let status = client.state.lock().unwrap_or_else(|e| e.into_inner()).status.clone();
+            if matches!(status, ConnectionStatus::Disconnected(_)) {
+                self.services.client = None;
+            }
+        }
+
         // AUTO-CONNECT (Discovery) - Throttled to avoid starving the main thread
         static LAST_CONNECT_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        
+
         if self.auto_connect && self.services.client.is_none() && (now - LAST_CONNECT_ATTEMPT.load(std::sync::atomic::Ordering::Relaxed) > 5) {
             let local_host = gethostname();
             if let Some(found) = self.browser.as_ref().and_then(|b| {
@@ -196,8 +208,25 @@ impl eframe::App for NetShareApp {
             }
         });
 
-        // Request repaint for animations at 30fps (33ms) to save CPU/prevent lag
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        // ── Adaptive repaint rate ────────────────────────────────────────────────
+        // • 16 ms  (~60 fps) while the user is dragging a screen box
+        // • 200 ms (~5 fps)  when connected — keeps ping/status display fresh
+        // • 2 000 ms (0.5 fps) when idle/disconnected — just enough to poll
+        //   the mDNS browser and trigger auto-connect every 5 seconds
+        // egui repaints instantly on any user interaction regardless of this timer,
+        // so responsiveness is unaffected.
+        let repaint_ms: u64 = if self.layout_drag.dragging_slot.is_some() {
+            16
+        } else {
+            let connected = self.services.client.as_ref().map_or(false, |c| {
+                matches!(
+                    c.state.lock().unwrap_or_else(|e| e.into_inner()).status,
+                    netshare_client::ConnectionStatus::Connected
+                )
+            });
+            if connected { 200 } else { 2_000 }
+        };
+        ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
     }
 }
 
