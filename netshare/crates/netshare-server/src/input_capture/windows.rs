@@ -135,6 +135,14 @@ unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         return LRESULT(1); // suppress — do not pass to OS
     }
 
+    // ── Hotkey: Ctrl+Shift+Alt+0 → force-release cursor to server ─────────
+    // Emergency escape hatch: if a topology mismatch leaves the cursor
+    // permanently locked on a client edge, this brings it back immediately.
+    if is_press && ctrl && shift && alt && vk == 0x30 {
+        send(CaptureEvent::Hotkey(HotkeyAction::ReleaseToLocal));
+        return LRESULT(1);
+    }
+
     // ── Hotkey: Scroll Lock → cycle ────────────────────────────────────────
     if is_press && vk == VK_SCROLL.0 {
         send(CaptureEvent::Hotkey(HotkeyAction::Cycle));
@@ -405,12 +413,25 @@ where
 }
 
 /// Release the cursor clip and seamless lock.  Called from the network layer
-/// when the client sends `CursorReturn`.
+/// when the client sends `CursorReturn` or the ReleaseToLocal hotkey fires.
 pub(crate) fn release_cursor() {
-    with_seamless_mut(|s| {
+    // Read screen center before clearing lock so we can warp there.
+    let (cx, cy) = with_seamless_mut(|s| {
         s.locked_to_slot = None;
+        // Use the layout's virtual-desktop center as the warp target.
+        // Falls back to 0,0 (Default) if layout is not yet configured.
+        let w = s.layout.server_width;
+        let h = s.layout.server_height;
+        (w / 2, h / 2)
     });
     unsafe {
         let _ = ClipCursor(None);
+        // Warp cursor to screen center so the next mouse move does not
+        // immediately re-trigger an EdgeEnter from the same edge pixel.
+        if cx > 0 || cy > 0 {
+            let _ = SetCursorPos(cx, cy);
+            LAST_X.with(|c| c.set(cx));
+            LAST_Y.with(|c| c.set(cy));
+        }
     }
 }

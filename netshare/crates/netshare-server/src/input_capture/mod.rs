@@ -18,6 +18,10 @@ mod linux;
 pub enum HotkeyAction {
     SwitchToSlot(u8),  // Ctrl+Shift+Alt+[1-9]
     Cycle,             // Scroll Lock
+    /// Force-release the cursor back to the server screen immediately.
+    /// Triggered by Ctrl+Shift+Alt+0.  Primary escape hatch when a topology
+    /// mismatch leaves the cursor permanently locked to a client screen.
+    ReleaseToLocal,
 }
 
 pub enum CaptureEvent {
