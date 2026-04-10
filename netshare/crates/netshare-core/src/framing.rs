@@ -74,8 +74,26 @@ fn next_seq() -> u16 {
     SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Write one `ControlPacket` to `writer`.
+/// Write one `ControlPacket` to `writer` and flush immediately.
+/// Use this for low-frequency one-shot packets (Hello, Heartbeat, etc.)
+/// where you need the data on the wire right away.
 pub async fn write_packet<W>(writer: &mut W, pkt: &ControlPacket, flags: u8) -> io::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    write_packet_buffered(writer, pkt, flags).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Write one `ControlPacket` into the writer's buffer **without** flushing.
+///
+/// Call `writer.flush()` once after writing the last packet of a batch.
+/// This allows multiple packets that arrived between scheduler wakeups to
+/// share a single TLS record and TCP segment, dramatically reducing per-packet
+/// encryption + syscall overhead on high-frequency input streams (mouse moves
+/// at 1 kHz → 1 TLS record per batch instead of one per event).
+pub async fn write_packet_buffered<W>(writer: &mut W, pkt: &ControlPacket, flags: u8) -> io::Result<()>
 where
     W: AsyncWriteExt + Unpin,
 {
@@ -91,7 +109,6 @@ where
 
     writer.write_all(&header.to_bytes()).await?;
     writer.write_all(&payload).await?;
-    writer.flush().await?;
     Ok(())
 }
 

@@ -222,7 +222,7 @@ where
         let root = conn.setup().roots[screen_num].root;
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(4)).await;
             let Ok(cookie) = conn.query_pointer(root) else { break };
             let Ok(reply)  = cookie.reply()            else { break };
             if at_return_edge(edge, reply.root_x as i32, reply.root_y as i32,
@@ -239,7 +239,7 @@ where
     // Windows / other: platform helpers are cheap per call (no new connection).
     #[allow(unreachable_code)]
     loop {
-        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(4)).await;
         let (cx, cy) = get_cursor_pos();
         if at_return_edge(edge, cx, cy, screen_width, screen_height) {
             let mut w = writer.lock().await;
