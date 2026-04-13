@@ -1,8 +1,9 @@
 /// Client TCP network layer — control channel on TCP :9000, TLS-wrapped.
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::io::BufWriter;
 use tokio::net::TcpStream;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use netshare_core::{
     framing::{read_packet, send_hello, write_packet},
@@ -11,6 +12,82 @@ use netshare_core::{
     tls::{make_client_config, SERVER_NAME},
 };
 use crate::input_inject;
+
+struct RollingLatencyStats {
+    label: &'static str,
+    capacity: usize,
+    samples: VecDeque<u64>,
+}
+
+impl RollingLatencyStats {
+    fn new(label: &'static str, capacity: usize) -> Self {
+        Self {
+            label,
+            capacity,
+            samples: VecDeque::with_capacity(capacity),
+        }
+    }
+
+    fn record(&mut self, sample_micros: u64) {
+        if self.samples.len() == self.capacity {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(sample_micros);
+        if self.samples.len() == self.capacity {
+            self.log_snapshot();
+        }
+    }
+
+    fn log_snapshot(&self) {
+        let mut sorted: Vec<u64> = self.samples.iter().copied().collect();
+        sorted.sort_unstable();
+        let p50 = percentile(&sorted, 50);
+        let p95 = percentile(&sorted, 95);
+        let p99 = percentile(&sorted, 99);
+        let max = *sorted.last().unwrap_or(&0);
+        debug!(
+            target: "netshare::latency",
+            label = self.label,
+            sample_count = sorted.len(),
+            p50_micros = p50,
+            p95_micros = p95,
+            p99_micros = p99,
+            max_micros = max,
+            "latency snapshot"
+        );
+    }
+}
+
+fn percentile(sorted: &[u64], pct: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = ((sorted.len() - 1) * pct) / 100;
+    sorted[idx]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{percentile, RollingLatencyStats};
+
+    #[test]
+    fn percentile_handles_small_windows() {
+        let values = [100, 200, 300, 400];
+        assert_eq!(percentile(&values, 50), 200);
+        assert_eq!(percentile(&values, 95), 300);
+    }
+
+    #[test]
+    fn rolling_stats_drop_oldest_entry() {
+        let mut stats = RollingLatencyStats::new("client", 2);
+        stats.record(7);
+        stats.record(8);
+        stats.record(9);
+
+        let samples: Vec<u64> = stats.samples.iter().copied().collect();
+        assert_eq!(samples, vec![8, 9]);
+    }
+}
 
 #[derive(Default)]
 pub struct ClientGuiState {
@@ -107,6 +184,9 @@ pub async fn run_client(
     // a new CursorEnter arrives (rapid edge-crossing would otherwise accumulate
     // unbounded tasks, eventually causing OOM on 24/7 systems).
     let mut return_task: Option<tokio::task::AbortHandle> = None;
+    let mut last_mouse_arrival: Option<std::time::Instant> = None;
+    let mut arrival_gap = RollingLatencyStats::new("client_mouse_arrival_gap", 2048);
+    let mut inject_latency = RollingLatencyStats::new("client_mouse_inject", 2048);
 
     let result: anyhow::Result<()> = loop {
         let (_, pkt) = match read_packet(&mut reader).await {
@@ -114,7 +194,23 @@ pub async fn run_client(
             Err(e) => break Err(e.into()),
         };
         match pkt {
-            ControlPacket::MouseMove(ev)   => input_inject::inject_mouse_move(ev),
+            ControlPacket::MouseMove(ev)   => {
+                let now = std::time::Instant::now();
+                if let Some(previous) = last_mouse_arrival.replace(now) {
+                    let gap_micros = now.duration_since(previous).as_micros().min(u64::MAX as u128) as u64;
+                    arrival_gap.record(gap_micros);
+                    if gap_micros > 10_000 {
+                        warn!(
+                            target: "netshare::latency",
+                            gap_micros,
+                            "client mouse arrival gap spike"
+                        );
+                    }
+                }
+                let inject_start = std::time::Instant::now();
+                input_inject::inject_mouse_move(ev);
+                inject_latency.record(inject_start.elapsed().as_micros().min(u64::MAX as u128) as u64);
+            }
             ControlPacket::MouseClick(ev)  => input_inject::inject_mouse_click(ev),
             ControlPacket::KeyEvent(ev)    => input_inject::inject_key(ev),
             ControlPacket::Scroll(ev)      => input_inject::inject_scroll(ev),

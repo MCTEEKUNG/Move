@@ -83,6 +83,20 @@ pub enum ControlPacket {
     Disconnect,
 }
 
+impl ControlPacket {
+    pub fn is_latency_sensitive(&self) -> bool {
+        matches!(
+            self,
+            Self::MouseMove(_)
+                | Self::MouseClick(_)
+                | Self::KeyEvent(_)
+                | Self::Scroll(_)
+                | Self::CursorEnter { .. }
+                | Self::CursorReturn
+        )
+    }
+}
+
 // ── Handshake payloads ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,4 +135,75 @@ pub struct ActiveClientChange {
 }
 
 // ── Protocol version ───────────────────────────────────────────────────────
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::{ButtonAction, KeyEvent, KeyFlags, MouseButton, MouseClick, MouseMove, MouseScroll};
+
+    fn sample_mouse_move() -> MouseMove {
+        MouseMove {
+            dx: 4,
+            dy: -2,
+            captured_at_micros: 123,
+        }
+    }
+
+    #[test]
+    fn marks_latency_sensitive_packets() {
+        let packets = [
+            ControlPacket::MouseMove(sample_mouse_move()),
+            ControlPacket::MouseClick(MouseClick {
+                button: MouseButton::Left,
+                action: ButtonAction::Press,
+                x: 0,
+                y: 0,
+            }),
+            ControlPacket::KeyEvent(KeyEvent {
+                vk: 0x41,
+                action: ButtonAction::Press,
+                scan: 0,
+                flags: KeyFlags::empty(),
+            }),
+            ControlPacket::Scroll(MouseScroll { delta_x: 0, delta_y: 120 }),
+            ControlPacket::CursorEnter { x: 0, y: 0, return_edge: ClientEdge::Left },
+            ControlPacket::CursorReturn,
+        ];
+
+        for packet in packets {
+            assert!(packet.is_latency_sensitive());
+        }
+    }
+
+    #[test]
+    fn leaves_non_latency_sensitive_packets_unmarked() {
+        let packets = [
+            ControlPacket::Heartbeat,
+            ControlPacket::Disconnect,
+            ControlPacket::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                client_name: "test-client".into(),
+                pairing_code: None,
+                screen_width: 1920,
+                screen_height: 1080,
+            }),
+            ControlPacket::HelloResponse(HelloResponse {
+                protocol_version: PROTOCOL_VERSION,
+                server_name: "test-server".into(),
+                assigned_slot: 1,
+                accepted: true,
+                reject_reason: None,
+                pairing_required: false,
+            }),
+            ControlPacket::ActiveClientChange(ActiveClientChange {
+                active_slot: 1,
+                active_name: "client-1".into(),
+            }),
+        ];
+
+        for packet in packets {
+            assert!(!packet.is_latency_sensitive());
+        }
+    }
+}

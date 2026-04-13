@@ -32,7 +32,7 @@ use windows::Win32::{
     },
 };
 use netshare_core::{
-    input::{ButtonAction, KeyEvent, KeyFlags, MouseButton, MouseClick, MouseMove, MouseScroll},
+    input::{capture_timestamp_micros, ButtonAction, KeyEvent, KeyFlags, MouseButton, MouseClick, MouseMove, MouseScroll},
     protocol::ControlPacket,
 };
 use super::{CaptureEvent, HotkeyAction, SharedSeamlessState};
@@ -216,7 +216,11 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             if let Some((slot, lock_x, lock_y)) = locked_info {
                 // Locked to a client — forward delta, suppress, clamp back.
                 let _ = slot;
-                send(CaptureEvent::InputPacket(ControlPacket::MouseMove(MouseMove { dx, dy })));
+                send(CaptureEvent::InputPacket(ControlPacket::MouseMove(MouseMove {
+                    dx,
+                    dy,
+                    captured_at_micros: capture_timestamp_micros(),
+                })));
                 // Warp cursor back to the lock pixel.
                 let _ = SetCursorPos(lock_x, lock_y);
                 // CRITICAL: reset LAST_X/Y to the warped position.
@@ -294,7 +298,11 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             }
 
             // Normal: forward as relative delta.
-            send(CaptureEvent::InputPacket(ControlPacket::MouseMove(MouseMove { dx, dy })));
+            send(CaptureEvent::InputPacket(ControlPacket::MouseMove(MouseMove {
+                dx,
+                dy,
+                captured_at_micros: capture_timestamp_micros(),
+            })));
             CallNextHookEx(None, code, wparam, lparam)
         }
 

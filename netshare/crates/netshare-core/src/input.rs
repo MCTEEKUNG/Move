@@ -1,11 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+pub fn capture_timestamp_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros()
+        .min(u64::MAX as u128) as u64
+}
+
 /// Normalised mouse move — delta from last position.
 /// Using delta (not absolute coords) avoids server/client resolution mismatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MouseMove {
     pub dx: i32,
     pub dy: i32,
+    pub captured_at_micros: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,5 +65,15 @@ bitflags::bitflags! {
     pub struct KeyFlags: u8 {
         const EXTENDED = 0x01;   // extended key (e.g. right Ctrl, numpad Enter)
         const UNICODE  = 0x02;   // vk carries a Unicode codepoint, not a VK_* code
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capture_timestamp_micros;
+
+    #[test]
+    fn capture_timestamp_is_non_zero() {
+        assert!(capture_timestamp_micros() > 0);
     }
 }

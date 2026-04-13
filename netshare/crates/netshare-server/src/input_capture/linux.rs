@@ -11,7 +11,8 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use netshare_core::input::{
-    ButtonAction, KeyEvent, KeyFlags, MouseButton, MouseClick, MouseMove, MouseScroll,
+    capture_timestamp_micros, ButtonAction, KeyEvent, KeyFlags, MouseButton, MouseClick,
+    MouseMove, MouseScroll,
 };
 use netshare_core::protocol::ControlPacket;
 use super::{CaptureEvent, SharedSeamlessState};
@@ -221,10 +222,18 @@ fn read_device_loop(
 fn handle_rel_axis(axis: evdev::RelativeAxisType, value: i32) -> Option<ControlPacket> {
     match axis {
         evdev::RelativeAxisType::REL_X => {
-            Some(ControlPacket::MouseMove(MouseMove { dx: value, dy: 0 }))
+            Some(ControlPacket::MouseMove(MouseMove {
+                dx: value,
+                dy: 0,
+                captured_at_micros: capture_timestamp_micros(),
+            }))
         }
         evdev::RelativeAxisType::REL_Y => {
-            Some(ControlPacket::MouseMove(MouseMove { dx: 0, dy: value }))
+            Some(ControlPacket::MouseMove(MouseMove {
+                dx: 0,
+                dy: value,
+                captured_at_micros: capture_timestamp_micros(),
+            }))
         }
         evdev::RelativeAxisType::REL_WHEEL => {
             Some(ControlPacket::Scroll(MouseScroll { delta_x: 0, delta_y: -value }))

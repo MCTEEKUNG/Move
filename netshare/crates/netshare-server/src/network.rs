@@ -1,11 +1,12 @@
 /// Server TCP network layer — control channel on TCP :9000, TLS-wrapped.
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tokio::time::MissedTickBehavior;
+use tracing::{debug, error, info, warn};
 
 use netshare_core::{
     framing::{read_packet, write_packet, write_packet_buffered},
@@ -14,11 +15,159 @@ use netshare_core::{
 
 use crate::active_client::ActiveClientState;
 use crate::audio::ServerAudio;
-use crate::input_capture::{self, CaptureEvent, HotkeyAction, SharedSeamlessState};
+use crate::input_capture::{CaptureEvent, HotkeyAction, SharedSeamlessState};
 use crate::tls::ServerTls;
 
 type ClientTx  = mpsc::UnboundedSender<ControlPacket>;
 type ClientMap = Arc<Mutex<HashMap<u8, ClientTx>>>;
+
+struct RollingLatencyStats {
+    label: &'static str,
+    capacity: usize,
+    samples: VecDeque<u64>,
+}
+
+impl RollingLatencyStats {
+    fn new(label: &'static str, capacity: usize) -> Self {
+        Self {
+            label,
+            capacity,
+            samples: VecDeque::with_capacity(capacity),
+        }
+    }
+
+    fn record(&mut self, sample_micros: u64) {
+        if self.samples.len() == self.capacity {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(sample_micros);
+        if self.samples.len() == self.capacity {
+            self.log_snapshot();
+        }
+    }
+
+    fn log_snapshot(&self) {
+        let mut sorted: Vec<u64> = self.samples.iter().copied().collect();
+        sorted.sort_unstable();
+        let p50 = percentile(&sorted, 50);
+        let p95 = percentile(&sorted, 95);
+        let p99 = percentile(&sorted, 99);
+        let max = *sorted.last().unwrap_or(&0);
+        debug!(
+            target: "netshare::latency",
+            label = self.label,
+            sample_count = sorted.len(),
+            p50_micros = p50,
+            p95_micros = p95,
+            p99_micros = p99,
+            max_micros = max,
+            "latency snapshot"
+        );
+    }
+}
+
+fn percentile(sorted: &[u64], pct: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = ((sorted.len() - 1) * pct) / 100;
+    sorted[idx]
+}
+
+fn now_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros()
+        .min(u64::MAX as u128) as u64
+}
+
+fn push_batched_packet(batch: &mut Vec<ControlPacket>, pkt: ControlPacket) {
+    match pkt {
+        ControlPacket::MouseMove(pkt_move) => {
+            if let Some(ControlPacket::MouseMove(last)) = batch.last_mut() {
+                last.dx += pkt_move.dx;
+                last.dy += pkt_move.dy;
+                last.captured_at_micros = last.captured_at_micros.min(pkt_move.captured_at_micros);
+            } else {
+                batch.push(ControlPacket::MouseMove(pkt_move));
+            }
+        }
+        other => batch.push(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{percentile, push_batched_packet, RollingLatencyStats};
+    use netshare_core::{
+        input::{ButtonAction, KeyEvent, KeyFlags, MouseMove},
+        protocol::ControlPacket,
+    };
+
+    fn mouse_move(dx: i32, dy: i32, captured_at_micros: u64) -> ControlPacket {
+        ControlPacket::MouseMove(MouseMove {
+            dx,
+            dy,
+            captured_at_micros,
+        })
+    }
+
+    #[test]
+    fn coalesces_consecutive_mouse_moves() {
+        let mut batch = Vec::new();
+        push_batched_packet(&mut batch, mouse_move(3, 4, 50));
+        push_batched_packet(&mut batch, mouse_move(-1, 6, 20));
+
+        assert_eq!(batch.len(), 1);
+        match &batch[0] {
+            ControlPacket::MouseMove(ev) => {
+                assert_eq!(ev.dx, 2);
+                assert_eq!(ev.dy, 10);
+                assert_eq!(ev.captured_at_micros, 20);
+            }
+            other => panic!("expected MouseMove, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn does_not_merge_across_packet_types() {
+        let mut batch = Vec::new();
+        push_batched_packet(&mut batch, mouse_move(1, 1, 10));
+        push_batched_packet(
+            &mut batch,
+            ControlPacket::KeyEvent(KeyEvent {
+                vk: 0x41,
+                action: ButtonAction::Press,
+                scan: 0,
+                flags: KeyFlags::empty(),
+            }),
+        );
+        push_batched_packet(&mut batch, mouse_move(2, 3, 15));
+
+        assert_eq!(batch.len(), 3);
+    }
+
+    #[test]
+    fn percentile_uses_expected_index() {
+        let values = [10, 20, 30, 40, 50];
+        assert_eq!(percentile(&values, 50), 30);
+        assert_eq!(percentile(&values, 95), 40);
+        assert_eq!(percentile(&values, 99), 40);
+    }
+
+    #[test]
+    fn rolling_stats_keep_only_latest_samples() {
+        let mut stats = RollingLatencyStats::new("test", 3);
+        stats.record(10);
+        stats.record(20);
+        stats.record(30);
+        stats.record(40);
+
+        let samples: Vec<u64> = stats.samples.iter().copied().collect();
+        assert_eq!(samples, vec![20, 30, 40]);
+    }
+}
 
 pub async fn run_server(
     addr: &str,
@@ -214,7 +363,7 @@ async fn handle_client(
             use netshare_core::layout::{ClientEdge, Placement};
             
             // Try to pick an edge that isn't occupied by a physical monitor or another client layout.
-            let (min_x, min_y, max_x, max_y) = s.layout.server_bounds();
+            let (min_x, _min_y, max_x, _max_y) = s.layout.server_bounds();
             let mut best_edge = ClientEdge::Right;
             
             // Very simple heuristic: if bounds extend left (< 0), left is probably blocked.
@@ -268,12 +417,10 @@ async fn handle_client(
     client_map.lock().unwrap_or_else(|e| e.into_inner()).insert(slot, client_tx.clone());
 
     // ── Heartbeat/Ping loop ────────────────────────────────────────────────
-    let hb_state = state.clone();
     let hb_tx    = client_tx.clone();
     let hb_task  = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            let start = std::time::Instant::now();
             if hb_tx.send(ControlPacket::Heartbeat).is_err() { break; }
             
             // The reader loop (below) will handle the response and calculate the delta.
@@ -310,23 +457,56 @@ async fn handle_client(
     // syscall count by 10-30× without adding any extra latency to the first
     // packet (flush still happens as soon as the channel drains).
     let writer_task = tokio::spawn(async move {
-        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_millis(8));
+        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_millis(1));
+        flush_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut needs_flush = false;
+        let mut queue_latency = RollingLatencyStats::new("server_input_queue", 2048);
         
         loop {
             tokio::select! {
                 pkt_opt = client_rx.recv() => {
                     let Some(pkt) = pkt_opt else { break };
-                    if let Err(e) = write_packet_buffered(&mut writer, &pkt, 0).await {
-                        error!("write error: {e}"); break;
+                    let mut batch = Vec::with_capacity(8);
+                    let mut flush_immediately = pkt.is_latency_sensitive();
+                    push_batched_packet(&mut batch, pkt);
+
+                    while let Ok(next_pkt) = client_rx.try_recv() {
+                        flush_immediately |= next_pkt.is_latency_sensitive();
+                        push_batched_packet(&mut batch, next_pkt);
                     }
-                    needs_flush = true;
-                    
-                    // Immediately drain any other available packets
-                    while let Ok(pkt) = client_rx.try_recv() {
-                        if let Err(e) = write_packet_buffered(&mut writer, &pkt, 0).await {
-                            error!("write error: {e}"); break;
+
+                    let mut write_failed = false;
+                    for pkt in &batch {
+                        if let ControlPacket::MouseMove(ev) = pkt {
+                            let queue_delay = now_micros().saturating_sub(ev.captured_at_micros);
+                            queue_latency.record(queue_delay);
+                            if queue_delay > 20_000 {
+                                warn!(
+                                    target: "netshare::latency",
+                                    queue_delay_micros = queue_delay,
+                                    batch_len = batch.len(),
+                                    flush_immediately,
+                                    "server input queue spike"
+                                );
+                            }
                         }
+                        if let Err(e) = write_packet_buffered(&mut writer, pkt, 0).await {
+                            write_failed = true;
+                            error!("write error: {e}");
+                            break;
+                        }
+                    }
+
+                    if write_failed {
+                        break;
+                    }
+
+                    needs_flush = true;
+                    if flush_immediately {
+                        if let Err(e) = writer.flush().await {
+                            error!("flush error: {e}"); break;
+                        }
+                        needs_flush = false;
                     }
                 }
                 _ = flush_ticker.tick() => {
