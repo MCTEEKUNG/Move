@@ -27,19 +27,15 @@ pub async fn run_server(
     tls: ServerTls,
     pairing_code: String,
     seamless: SharedSeamlessState,
+    mut capture_rx: tokio::sync::mpsc::UnboundedReceiver<CaptureEvent>,
 ) -> anyhow::Result<()> {
     let listener   = TcpListener::bind(addr).await?;
     let client_map: ClientMap = Arc::new(Mutex::new(HashMap::new()));
     let audio      = Arc::new(audio);
 
     // ── Start input capture thread ─────────────────────────────────────────
-    let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<CaptureEvent>();
-    let seamless_for_hook = seamless.clone();
-    std::thread::spawn({
-        let tx = capture_tx.clone();
-        move || input_capture::start_capture(tx, seamless_for_hook)
-    });
-
+    // capture_tx is created and started in lib.rs to allow GUI injection.
+    
     // ── Fan-out loop ───────────────────────────────────────────────────────
     let fan_state  = state.clone();
     let fan_map    = client_map.clone();
@@ -314,19 +310,33 @@ async fn handle_client(
     // syscall count by 10-30× without adding any extra latency to the first
     // packet (flush still happens as soon as the channel drains).
     let writer_task = tokio::spawn(async move {
-        'outer: while let Some(pkt) = client_rx.recv().await {
-            if let Err(e) = write_packet_buffered(&mut writer, &pkt, 0).await {
-                error!("write error: {e}"); break;
-            }
-            // Drain any additional packets queued since the last wakeup.
-            while let Ok(pkt) = client_rx.try_recv() {
-                if let Err(e) = write_packet_buffered(&mut writer, &pkt, 0).await {
-                    error!("write error: {e}"); break 'outer;
+        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_millis(8));
+        let mut needs_flush = false;
+        
+        loop {
+            tokio::select! {
+                pkt_opt = client_rx.recv() => {
+                    let Some(pkt) = pkt_opt else { break };
+                    if let Err(e) = write_packet_buffered(&mut writer, &pkt, 0).await {
+                        error!("write error: {e}"); break;
+                    }
+                    needs_flush = true;
+                    
+                    // Immediately drain any other available packets
+                    while let Ok(pkt) = client_rx.try_recv() {
+                        if let Err(e) = write_packet_buffered(&mut writer, &pkt, 0).await {
+                            error!("write error: {e}"); break;
+                        }
+                    }
                 }
-            }
-            // Single flush for the whole batch → one TLS record.
-            if let Err(e) = writer.flush().await {
-                error!("flush error: {e}"); break;
+                _ = flush_ticker.tick() => {
+                    if needs_flush {
+                        if let Err(e) = writer.flush().await {
+                            error!("flush error: {e}"); break;
+                        }
+                        needs_flush = false;
+                    }
+                }
             }
         }
     });

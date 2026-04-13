@@ -40,10 +40,13 @@ pub async fn run_server(_recv_dir: PathBuf, tls: crate::tls::ServerTls) {
             info!("Clipboard channel connected from {peer} (TLS)");
             let (r, w) = tokio::io::split(stream);
             let mut reader = BufReader::new(r);
-            let mut writer = BufWriter::new(w);
+            let writer = BufWriter::new(w);
+
+            let (pkt_tx, mut pkt_rx) = tokio::sync::mpsc::unbounded_channel::<ClipboardPacket>();
 
             // Spawn a task to poll our local clipboard and push changes to the client.
             let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
+            let poll_tx = pkt_tx.clone();
             tokio::spawn(async move {
                 let mut ticker = interval(Duration::from_millis(500));
                 let mut last_text: Option<String> = None;
@@ -95,9 +98,18 @@ pub async fn run_server(_recv_dir: PathBuf, tls: crate::tls::ServerTls) {
                     };
 
                     if changed {
-                        // Write to writer — shared via Arc<Mutex<>> would be needed for
-                        // proper half-duplex; for Phase 3 we serialise via a channel.
-                        // (Full duplex writer sharing added in Phase 4.)
+                        poll_tx.send(pkt).ok();
+                    }
+                }
+            });
+
+            let mut writer = writer;
+            let write_task = tokio::spawn(async move {
+                while let Some(pkt) = pkt_rx.recv().await {
+                    let pkt_type = pkt.pkt_type();
+                    if let Err(e) = write_value(&mut writer, pkt_type, &pkt).await {
+                        warn!("clipboard write error: {e}");
+                        break;
                     }
                 }
             });
@@ -129,6 +141,9 @@ pub async fn run_server(_recv_dir: PathBuf, tls: crate::tls::ServerTls) {
                     warn!("clipboard inject error: {e}");
                 }
             }
+
+            let _ = done_tx.send(());
+            write_task.abort();
         });
     }
 }

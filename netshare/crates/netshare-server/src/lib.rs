@@ -35,6 +35,7 @@ pub struct ServerHandle {
     file_send_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>,
     seamless: SharedSeamlessState,
     mic_muted: Arc<AtomicBool>,
+    pub capture_tx: tokio::sync::mpsc::UnboundedSender<crate::input_capture::CaptureEvent>,
 }
 
 impl ServerHandle {
@@ -82,6 +83,61 @@ impl ServerHandle {
     pub fn is_mic_muted(&self) -> bool {
         use std::sync::atomic::Ordering;
         self.mic_muted.load(Ordering::Relaxed)
+    }
+
+    /// Force focus (keyboard and mouse) to a specific client slot.
+    pub fn focus_client(&self, slot: u8) {
+        if slot == 0 {
+            // Return to local
+            self.active.force_active(0);
+            let mut s = self.seamless.lock().unwrap_or_else(|e| e.into_inner());
+            s.locked_to_slot = None;
+            #[cfg(target_os = "windows")]
+            crate::input_capture::windows::release_cursor();
+        } else {
+            // Focus remote
+            let mut s = self.seamless.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(placement) = s.layout.placements.get(&slot).cloned() {
+                // Calculate lock coordinates based on the edge
+                let (vx_min, vy_min, vx_max, vy_max) = s.layout.server_bounds();
+                let center_x = (vx_max + vx_min) / 2;
+                let center_y = (vy_max + vy_min) / 2;
+                
+                let (lx, ly) = match placement.edge {
+                    netshare_core::layout::ClientEdge::Right  => (vx_max - 1, center_y),
+                    netshare_core::layout::ClientEdge::Left   => (vx_min,     center_y),
+                    netshare_core::layout::ClientEdge::Below  => (center_x,   vy_max - 1),
+                    netshare_core::layout::ClientEdge::Above  => (center_x,   vy_min),
+                };
+
+                // Update the state so the low-level hook starts forwarding and suppressing
+                s.locked_to_slot = Some(slot);
+                s.lock_x = lx;
+                s.lock_y = ly;
+
+                // Send EdgeEnter to trigger network broadcast and client CursorEnter
+                let _ = self.capture_tx.send(crate::input_capture::CaptureEvent::EdgeEnter {
+                    slot,
+                    entry_x: lx,
+                    entry_y: ly,
+                    server_edge: placement.edge,
+                });
+                
+                #[cfg(target_os = "windows")]
+                unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::{SetCursorPos, ClipCursor};
+                    use windows::Win32::Foundation::RECT;
+                    let _ = SetCursorPos(lx, ly);
+                    let clip = RECT {
+                        left:   lx,
+                        top:    ly,
+                        right:  lx + 1,
+                        bottom: ly + 1,
+                    };
+                    let _ = ClipCursor(Some(&clip));
+                }
+            }
+        }
     }
 }
 
@@ -270,6 +326,15 @@ pub fn start(bind_addr: &str) -> anyhow::Result<ServerHandle> {
         }
     });
 
+    let (capture_tx, capture_rx) = tokio::sync::mpsc::unbounded_channel::<crate::input_capture::CaptureEvent>();
+    
+    // Start input capture thread.
+    let seamless_for_hook = seamless.clone();
+    std::thread::spawn({
+        let tx = capture_tx.clone();
+        move || input_capture::start_capture(tx, seamless_for_hook)
+    });
+
     // Control channel.
     let bind = bind_addr.to_owned();
     let active_for_net = active.clone();
@@ -278,10 +343,10 @@ pub fn start(bind_addr: &str) -> anyhow::Result<ServerHandle> {
     let tls_for_net = tls.clone();
     let seamless_for_net = seamless.clone();
     tokio::spawn(async move {
-        if let Err(e) = network::run_server(&bind, audio, active_for_net, tls_for_net, pairing, seamless_for_net).await {
+        if let Err(e) = network::run_server(&bind, audio, active_for_net, tls_for_net, pairing, seamless_for_net, capture_rx).await {
             tracing::error!("Server network error: {e}");
         }
     });
     let pairing_code = tls.pairing_code.clone();
-    Ok(ServerHandle { active, pairing_code, pending_file_requests: pending, file_send_tx, seamless, mic_muted })
+    Ok(ServerHandle { active, pairing_code, pending_file_requests: pending, file_send_tx, seamless, mic_muted, capture_tx })
 }
