@@ -13,3 +13,7 @@ netshare/target
 # OS
 .DS_Store
 Thumbs.db
+
+# NetShare local staging and signing artifacts
+netshare/stage/
+netshare/certs/
