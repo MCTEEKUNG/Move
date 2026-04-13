@@ -90,6 +90,13 @@ impl ActiveClientState {
     /// the audio port (9002) — used to route mic UDP packets.
     pub fn active_client_audio_addr(&self) -> Option<SocketAddr> {
         let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if g.active_slot == 0 && g.clients.len() == 1 {
+            return g
+                .clients
+                .first()
+                .map(|c| SocketAddr::new(c.peer.ip(), 9002));
+        }
+
         g.clients
             .iter()
             .find(|c| c.slot == g.active_slot)
@@ -137,5 +144,46 @@ impl ActiveClientState {
     /// slot=0 means server is active.
     pub fn force_active(&self, slot: u8) {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).active_slot = slot;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ActiveClientState;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn peer(port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    }
+
+    #[test]
+    fn audio_routes_to_only_connected_client_without_focus() {
+        let state = ActiveClientState::default();
+        let slot = state.register("client-1".to_owned(), peer(9100));
+
+        assert_eq!(slot, 1);
+        assert_eq!(state.active_slot(), 0);
+        assert_eq!(state.active_client_audio_addr(), Some(peer(9002)));
+    }
+
+    #[test]
+    fn audio_does_not_guess_when_multiple_clients_exist_and_none_are_active() {
+        let state = ActiveClientState::default();
+        state.register("client-1".to_owned(), peer(9100));
+        state.register("client-2".to_owned(), peer(9200));
+
+        assert_eq!(state.active_slot(), 0);
+        assert_eq!(state.active_client_audio_addr(), None);
+    }
+
+    #[test]
+    fn audio_prefers_the_explicit_active_client() {
+        let state = ActiveClientState::default();
+        state.register("client-1".to_owned(), peer(9100));
+        let slot_2 = state.register("client-2".to_owned(), peer(9200));
+
+        state.switch_to(slot_2).expect("slot 2 should exist");
+
+        assert_eq!(state.active_client_audio_addr(), Some(peer(9002)));
     }
 }

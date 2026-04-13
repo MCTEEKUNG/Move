@@ -1126,7 +1126,7 @@ impl NetShareApp {
                 .inner_margin(16.0)
                 .show(ui, |ui| {
                     ui.label(
-                        RichText::new("Audio & Sharing")
+                        RichText::new("Audio and Sharing")
                             .strong()
                             .color(Color32::from_rgb(0, 150, 255)),
                     );
@@ -1136,7 +1136,7 @@ impl NetShareApp {
                         if ui
                             .checkbox(
                                 &mut audio_enabled,
-                                "Share desktop audio with connected device",
+                                "Share desktop audio with the connected device",
                             )
                             .changed()
                         {
