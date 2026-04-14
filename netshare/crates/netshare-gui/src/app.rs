@@ -72,6 +72,10 @@ pub struct NetShareApp {
     pairing_input: String,
     auto_connect: bool,
 
+    // Audio Output
+    output_devices: Vec<String>,
+    selected_output_device: String,
+
     // UI Helpers
     browser: Option<MdnsBrowser>,
     tray: Option<TrayHandle>,
@@ -97,6 +101,8 @@ impl NetShareApp {
             client_name,
             pairing_input: String::new(),
             auto_connect: true,
+            output_devices: Vec::new(),
+            selected_output_device: String::new(),
             browser,
             tray,
             window_visible: true,
@@ -1146,6 +1152,44 @@ impl NetShareApp {
                             } else {
                                 "Audio disabled"
                             });
+                        }
+
+                        ui.add_space(12.0);
+                        ui.label(RichText::new("Output Device:").color(Color32::GRAY));
+                        ui.add_space(4.0);
+
+                        self.output_devices = handle.output_devices();
+                        let current = handle.selected_output_device().unwrap_or_default();
+                        if self.output_devices.is_empty() && !current.is_empty() {
+                            self.output_devices.insert(0, current.clone());
+                        }
+                        if self.selected_output_device.is_empty() && !current.is_empty() {
+                            self.selected_output_device = current;
+                        }
+
+                        let mut selected_idx: usize = self
+                            .output_devices
+                            .iter()
+                            .position(|d| d == &self.selected_output_device)
+                            .unwrap_or(0);
+
+                        egui::ComboBox::from_id_source("output_device")
+                            .selected_text(&self.output_devices[selected_idx])
+                            .show_ui(ui, |ui: &mut egui::Ui| {
+                                for (i, name) in self.output_devices.iter().enumerate() {
+                                    ui.selectable_value(&mut selected_idx, i, name);
+                                }
+                            });
+
+                        if selected_idx
+                            != self
+                                .output_devices
+                                .iter()
+                                .position(|d| d == &self.selected_output_device)
+                                .unwrap_or(0)
+                        {
+                            self.selected_output_device = self.output_devices[selected_idx].clone();
+                            handle.set_output_device(self.selected_output_device.clone());
                         }
                     }
                 });

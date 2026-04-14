@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 
+pub use audio_sink::{enumerate_output_devices, AudioSinkHandle};
+
 /// 48 kHz, stereo, 10 ms frames → 480 samples/ch → 960 interleaved f32 per frame.
 pub const SAMPLE_RATE:    u32 = 48_000;
 pub const CHANNELS:       u16 = 2;
@@ -24,6 +26,8 @@ pub struct ServerAudio {
     pub mic_target: Arc<Mutex<Option<SocketAddr>>>,
     /// When true, mic frames are silently dropped before encoding/sending.
     pub mic_muted: Arc<AtomicBool>,
+    /// Audio output sink handle for device selection.
+    pub audio_sink: Option<AudioSinkHandle>,
 }
 
 impl ServerAudio {
@@ -38,11 +42,19 @@ impl ServerAudio {
         if let Err(e) = mic_capture::start(Arc::clone(&mic_target), Arc::clone(&mic_muted)) {
             tracing::warn!("Mic capture disabled: {e}");
         }
-        if let Err(e) = audio_sink::start(9001) {
-            tracing::warn!("Audio sink disabled: {e}");
-        }
+        
+        let audio_sink = match audio_sink::start(9001) {
+            Ok(handle) => {
+                tracing::info!("Audio sink started with device selection support");
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::warn!("Audio sink disabled: {e}");
+                None
+            }
+        };
 
-        Ok(Self { mic_target, mic_muted })
+        Ok(Self { mic_target, mic_muted, audio_sink })
     }
 
     /// Called by the network layer when the active client changes.

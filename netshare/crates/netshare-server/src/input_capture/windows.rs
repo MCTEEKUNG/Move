@@ -8,34 +8,35 @@
 //! This module is called from a dedicated OS thread (not a tokio task).
 //! Captured events are sent through an mpsc channel to the tokio runtime.
 
+use super::{CaptureEvent, HotkeyAction, SharedSeamlessState};
+use netshare_core::{
+    input::{
+        capture_timestamp_micros, ButtonAction, KeyEvent, KeyFlags, MouseButton, MouseClick,
+        MouseMove, MouseScroll,
+    },
+    layout::ClientEdge,
+    protocol::ControlPacket,
+};
 use std::cell::Cell;
 use tokio::sync::mpsc;
 use tracing::warn;
 use windows::Win32::{
     Foundation::{LPARAM, LRESULT, RECT, WPARAM},
-    UI::{
-        Input::KeyboardAndMouse::VK_SCROLL,
-        WindowsAndMessaging::{
-            CallNextHookEx, ClipCursor, DispatchMessageW, GetMessageW, SetCursorPos,
-            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-            HHOOK, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, MSG,
-            WH_KEYBOARD_LL, WH_MOUSE_LL,
-            WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-            WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-            WM_XBUTTONDOWN, WM_XBUTTONUP,
-        },
-    },
     System::Threading::{
         GetCurrentProcess, GetCurrentThread, SetPriorityClass, SetThreadPriority,
         HIGH_PRIORITY_CLASS, THREAD_PRIORITY_HIGHEST,
     },
+    UI::{
+        Input::KeyboardAndMouse::VK_SCROLL,
+        WindowsAndMessaging::{
+            CallNextHookEx, ClipCursor, DispatchMessageW, GetMessageW, SetCursorPos,
+            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG,
+            MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+            WM_RBUTTONUP, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP,
+        },
+    },
 };
-use netshare_core::{
-    input::{capture_timestamp_micros, ButtonAction, KeyEvent, KeyFlags, MouseButton, MouseClick, MouseMove, MouseScroll},
-    protocol::ControlPacket,
-};
-use super::{CaptureEvent, HotkeyAction, SharedSeamlessState};
 
 // ── Injected-input flag ───────────────────────────────────────────────────────
 const LLMHF_INJECTED: u32 = 0x01;
@@ -57,10 +58,10 @@ thread_local! {
 // Virtual key constants not re-exported by the `windows` crate at this path.
 const VK_LCONTROL: u16 = 0xA2;
 const VK_RCONTROL: u16 = 0xA3;
-const VK_LSHIFT:   u16 = 0xA0;
-const VK_RSHIFT:   u16 = 0xA1;
-const VK_LMENU:    u16 = 0xA4; // left Alt
-const VK_RMENU:    u16 = 0xA5; // right Alt
+const VK_LSHIFT: u16 = 0xA0;
+const VK_RSHIFT: u16 = 0xA1;
+const VK_LMENU: u16 = 0xA4; // left Alt
+const VK_RMENU: u16 = 0xA5; // right Alt
 
 /// Entry point — installs hooks and runs the message loop until WM_QUIT.
 pub(super) fn run_hook(tx: mpsc::UnboundedSender<CaptureEvent>, seamless: SharedSeamlessState) {
@@ -68,12 +69,12 @@ pub(super) fn run_hook(tx: mpsc::UnboundedSender<CaptureEvent>, seamless: Shared
     SEAMLESS.with(|cell| cell.set(Some(seamless)));
 
     // ── Performance Optimization ───────────────────────────────────────────
-    // Escalating the priority of this process and thread ensures that the 
+    // Escalating the priority of this process and thread ensures that the
     // Low-Level Hook is serviced as rapidly as possible, even when the CPU is busy.
     unsafe {
         let process = GetCurrentProcess();
         let _ = SetPriorityClass(process, HIGH_PRIORITY_CLASS);
-        
+
         let thread = GetCurrentThread();
         let _ = SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST);
     }
@@ -109,23 +110,26 @@ unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
 
     let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
     let vk = info.vkCode as u16;
-    let is_press = matches!(
-        wparam.0 as u32,
-        WM_KEYDOWN | WM_SYSKEYDOWN
-    );
+    let is_press = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
 
     // Track modifier state.
-    let is_ctrl  = matches!(vk, VK_LCONTROL | VK_RCONTROL);
+    let is_ctrl = matches!(vk, VK_LCONTROL | VK_RCONTROL);
     let is_shift = matches!(vk, VK_LSHIFT | VK_RSHIFT);
-    let is_alt   = matches!(vk, VK_LMENU | VK_RMENU);
+    let is_alt = matches!(vk, VK_LMENU | VK_RMENU);
 
-    if is_ctrl  { CTRL_DOWN.with(|c| c.set(is_press)); }
-    if is_shift { SHIFT_DOWN.with(|c| c.set(is_press)); }
-    if is_alt   { ALT_DOWN.with(|c| c.set(is_press)); }
+    if is_ctrl {
+        CTRL_DOWN.with(|c| c.set(is_press));
+    }
+    if is_shift {
+        SHIFT_DOWN.with(|c| c.set(is_press));
+    }
+    if is_alt {
+        ALT_DOWN.with(|c| c.set(is_press));
+    }
 
-    let ctrl  = CTRL_DOWN.with(|c| c.get());
+    let ctrl = CTRL_DOWN.with(|c| c.get());
     let shift = SHIFT_DOWN.with(|c| c.get());
-    let alt   = ALT_DOWN.with(|c| c.get());
+    let alt = ALT_DOWN.with(|c| c.get());
 
     // ── Hotkey: Ctrl+Shift+Alt+[1-9] ──────────────────────────────────────
     // VK '1'..'9' = 0x31..0x39
@@ -150,8 +154,28 @@ unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     }
 
     // ── If locked to a slot, forward key events to that client ────────────
-    let locked = with_seamless(|s| s.locked_to_slot);
-    if locked.is_some() {
+    // Also check if cursor is at a client edge (even if not yet locked)
+    let x = LAST_X.with(|c| c.get());
+    let y = LAST_Y.with(|c| c.get());
+    let lock_target = with_seamless(|s| {
+        if let Some(slot) = s.locked_to_slot {
+            Some(slot)
+        } else {
+            // Cursor not locked — check if it's at a client edge
+            let (vx_min, vy_min, vx_max, vy_max) = s.layout.server_bounds();
+            let found = s.layout.placements.iter().find(|(&_slot, placement)| {
+                let on_edge = match placement.edge {
+                    ClientEdge::Right => x >= vx_max - 1,
+                    ClientEdge::Left => x <= vx_min,
+                    ClientEdge::Below => y >= vy_max - 1,
+                    ClientEdge::Above => y <= vy_min,
+                };
+                on_edge
+            });
+            found.map(|(&slot, _)| slot)
+        }
+    });
+    if let Some(slot) = lock_target {
         // Build and forward the key event, then suppress.
         let mut flags = KeyFlags::empty();
         if info.flags.0 & 0x01 != 0 {
@@ -159,7 +183,11 @@ unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         }
         let evt = KeyEvent {
             vk: info.vkCode,
-            action: if is_press { ButtonAction::Press } else { ButtonAction::Release },
+            action: if is_press {
+                ButtonAction::Press
+            } else {
+                ButtonAction::Release
+            },
             scan: info.scanCode as u16,
             flags,
         };
@@ -174,7 +202,11 @@ unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     }
     let evt = KeyEvent {
         vk: info.vkCode,
-        action: if is_press { ButtonAction::Press } else { ButtonAction::Release },
+        action: if is_press {
+            ButtonAction::Press
+        } else {
+            ButtonAction::Release
+        },
         scan: info.scanCode as u16,
         flags,
     };
@@ -192,7 +224,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     }
 
     let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-    let msg  = wparam.0 as u32;
+    let msg = wparam.0 as u32;
 
     // Skip injected mouse events (e.g. from our own SetCursorPos call).
     if msg == WM_MOUSEMOVE && (info.flags & LLMHF_INJECTED) != 0 {
@@ -209,18 +241,19 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             LAST_Y.with(|c| c.set(info.pt.y));
 
             // Check if locked to a client.
-            let locked_info = with_seamless(|s| {
-                s.locked_to_slot.map(|slot| (slot, s.lock_x, s.lock_y))
-            });
+            let locked_info =
+                with_seamless(|s| s.locked_to_slot.map(|slot| (slot, s.lock_x, s.lock_y)));
 
             if let Some((slot, lock_x, lock_y)) = locked_info {
                 // Locked to a client — forward delta, suppress, clamp back.
                 let _ = slot;
-                send(CaptureEvent::InputPacket(ControlPacket::MouseMove(MouseMove {
-                    dx,
-                    dy,
-                    captured_at_micros: capture_timestamp_micros(),
-                })));
+                send(CaptureEvent::InputPacket(ControlPacket::MouseMove(
+                    MouseMove {
+                        dx,
+                        dy,
+                        captured_at_micros: capture_timestamp_micros(),
+                    },
+                )));
                 // Warp cursor back to the lock pixel.
                 let _ = SetCursorPos(lock_x, lock_y);
                 // CRITICAL: reset LAST_X/Y to the warped position.
@@ -239,7 +272,9 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             use netshare_core::layout::ClientEdge;
             let edge_result = with_seamless_mut(|s| {
                 // Already locked — nothing to do.
-                if s.locked_to_slot.is_some() { return None; }
+                if s.locked_to_slot.is_some() {
+                    return None;
+                }
                 if s.layout.server_width == 0 || s.layout.server_height == 0 {
                     return None;
                 }
@@ -249,22 +284,26 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 
                 let found_slot = s.layout.placements.iter().find_map(|(&slot, placement)| {
                     let on_edge = match placement.edge {
-                        ClientEdge::Right  => x >= vx_max - 1,
-                        ClientEdge::Left   => x <= vx_min,
-                        ClientEdge::Below  => y >= vy_max - 1,
-                        ClientEdge::Above  => y <= vy_min,
+                        ClientEdge::Right => x >= vx_max - 1,
+                        ClientEdge::Left => x <= vx_min,
+                        ClientEdge::Below => y >= vy_max - 1,
+                        ClientEdge::Above => y <= vy_min,
                     };
-                    if on_edge { Some(slot) } else { None }
+                    if on_edge {
+                        Some(slot)
+                    } else {
+                        None
+                    }
                 });
 
                 if let Some(slot) = found_slot {
                     let entry = s.layout.entry_pos(slot, x, y);
                     let server_edge = s.layout.placements[&slot].edge;
                     let (lx, ly) = match server_edge {
-                        ClientEdge::Right  => (vx_max - 1, y.clamp(vy_min, vy_max - 1)),
-                        ClientEdge::Left   => (vx_min,     y.clamp(vy_min, vy_max - 1)),
-                        ClientEdge::Below  => (x.clamp(vx_min, vx_max - 1), vy_max - 1),
-                        ClientEdge::Above  => (x.clamp(vx_min, vx_max - 1), vy_min),
+                        ClientEdge::Right => (vx_max - 1, y.clamp(vy_min, vy_max - 1)),
+                        ClientEdge::Left => (vx_min, y.clamp(vy_min, vy_max - 1)),
+                        ClientEdge::Below => (x.clamp(vx_min, vx_max - 1), vy_max - 1),
+                        ClientEdge::Above => (x.clamp(vx_min, vx_max - 1), vy_min),
                     };
                     // Atomically set the lock — no other thread can race here.
                     s.locked_to_slot = Some(slot);
@@ -280,9 +319,9 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 // Lock cursor to lock position.
                 let _ = SetCursorPos(lock_x, lock_y);
                 let clip = RECT {
-                    left:   lock_x,
-                    top:    lock_y,
-                    right:  lock_x + 1,
+                    left: lock_x,
+                    top: lock_y,
+                    right: lock_x + 1,
                     bottom: lock_y + 1,
                 };
                 let _ = ClipCursor(Some(&clip));
@@ -298,29 +337,41 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             }
 
             // Normal: forward as relative delta.
-            send(CaptureEvent::InputPacket(ControlPacket::MouseMove(MouseMove {
-                dx,
-                dy,
-                captured_at_micros: capture_timestamp_micros(),
-            })));
+            send(CaptureEvent::InputPacket(ControlPacket::MouseMove(
+                MouseMove {
+                    dx,
+                    dy,
+                    captured_at_micros: capture_timestamp_micros(),
+                },
+            )));
             CallNextHookEx(None, code, wparam, lparam)
         }
 
-        WM_LBUTTONDOWN | WM_LBUTTONUP
-        | WM_RBUTTONDOWN | WM_RBUTTONUP
-        | WM_MBUTTONDOWN | WM_MBUTTONUP
-        | WM_XBUTTONDOWN | WM_XBUTTONUP => {
+        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
+        | WM_MBUTTONUP | WM_XBUTTONDOWN | WM_XBUTTONUP => {
             let locked = with_seamless(|s| s.locked_to_slot);
             let pkt = match msg {
-                WM_LBUTTONDOWN => Some(mouse_click(MouseButton::Left,   ButtonAction::Press,   info)),
-                WM_LBUTTONUP   => Some(mouse_click(MouseButton::Left,   ButtonAction::Release, info)),
-                WM_RBUTTONDOWN => Some(mouse_click(MouseButton::Right,  ButtonAction::Press,   info)),
-                WM_RBUTTONUP   => Some(mouse_click(MouseButton::Right,  ButtonAction::Release, info)),
-                WM_MBUTTONDOWN => Some(mouse_click(MouseButton::Middle, ButtonAction::Press,   info)),
-                WM_MBUTTONUP   => Some(mouse_click(MouseButton::Middle, ButtonAction::Release, info)),
+                WM_LBUTTONDOWN => Some(mouse_click(MouseButton::Left, ButtonAction::Press, info)),
+                WM_LBUTTONUP => Some(mouse_click(MouseButton::Left, ButtonAction::Release, info)),
+                WM_RBUTTONDOWN => Some(mouse_click(MouseButton::Right, ButtonAction::Press, info)),
+                WM_RBUTTONUP => Some(mouse_click(MouseButton::Right, ButtonAction::Release, info)),
+                WM_MBUTTONDOWN => Some(mouse_click(MouseButton::Middle, ButtonAction::Press, info)),
+                WM_MBUTTONUP => Some(mouse_click(
+                    MouseButton::Middle,
+                    ButtonAction::Release,
+                    info,
+                )),
                 WM_XBUTTONDOWN | WM_XBUTTONUP => {
-                    let btn = if (info.mouseData >> 16) == 1 { MouseButton::X1 } else { MouseButton::X2 };
-                    let act = if msg == WM_XBUTTONDOWN { ButtonAction::Press } else { ButtonAction::Release };
+                    let btn = if (info.mouseData >> 16) == 1 {
+                        MouseButton::X1
+                    } else {
+                        MouseButton::X2
+                    };
+                    let act = if msg == WM_XBUTTONDOWN {
+                        ButtonAction::Press
+                    } else {
+                        ButtonAction::Release
+                    };
                     Some(mouse_click(btn, act, info))
                 }
                 _ => None,
@@ -336,10 +387,12 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 
         WM_MOUSEWHEEL => {
             let delta = (info.mouseData >> 16) as i16; // signed wheel delta
-            send(CaptureEvent::InputPacket(ControlPacket::Scroll(MouseScroll {
-                delta_x: 0,
-                delta_y: delta as i32,
-            })));
+            send(CaptureEvent::InputPacket(ControlPacket::Scroll(
+                MouseScroll {
+                    delta_x: 0,
+                    delta_y: delta as i32,
+                },
+            )));
             let locked = with_seamless(|s| s.locked_to_slot);
             if locked.is_some() {
                 return LRESULT(1);
@@ -354,7 +407,12 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 fn mouse_click(button: MouseButton, action: ButtonAction, _info: &MSLLHOOKSTRUCT) -> ControlPacket {
     // x/y are not transmitted: the client injects at its current cursor
     // position (dx=0, dy=0 without MOUSEEVENTF_ABSOLUTE).
-    ControlPacket::MouseClick(MouseClick { button, action, x: 0, y: 0 })
+    ControlPacket::MouseClick(MouseClick {
+        button,
+        action,
+        x: 0,
+        y: 0,
+    })
 }
 
 fn send(evt: CaptureEvent) {

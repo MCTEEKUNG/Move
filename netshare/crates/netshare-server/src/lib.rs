@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
 use active_client::ActiveClientState;
-use audio::ServerAudio;
+use audio::{enumerate_output_devices, ServerAudio, AudioSinkHandle};
 use input_capture::{SeamlessState, SharedSeamlessState};
 pub use tls::ServerTls;
 use netshare_core::layout::LayoutConfig;
@@ -36,6 +36,7 @@ pub struct ServerHandle {
     seamless: SharedSeamlessState,
     mic_muted: Arc<AtomicBool>,
     pub capture_tx: tokio::sync::mpsc::UnboundedSender<crate::input_capture::CaptureEvent>,
+    audio_sink: Option<AudioSinkHandle>,
 }
 
 impl ServerHandle {
@@ -83,6 +84,24 @@ impl ServerHandle {
     pub fn is_mic_muted(&self) -> bool {
         use std::sync::atomic::Ordering;
         self.mic_muted.load(Ordering::Relaxed)
+    }
+
+    /// Get list of available audio output devices.
+    pub fn output_devices(&self) -> Vec<String> {
+        enumerate_output_devices()
+    }
+
+    /// Get currently selected output device name.
+    pub fn selected_output_device(&self) -> Option<String> {
+        self.audio_sink.as_ref().map(|h| h.selected_device())
+    }
+
+    /// Set the audio output device.
+    pub fn set_output_device(&self, name: String) {
+        if let Some(handle) = &self.audio_sink {
+            handle.set_device(name.clone());
+            tracing::info!("Output device changed to: {}", name);
+        }
     }
 
     /// Force focus (keyboard and mouse) to a specific client slot.
@@ -278,6 +297,7 @@ pub fn start(bind_addr: &str) -> anyhow::Result<ServerHandle> {
         ServerAudio {
             mic_target: Arc::new(Mutex::new(None)),
             mic_muted:  Arc::new(AtomicBool::new(false)),
+            audio_sink: None,
         }
     });
     let tls     = ServerTls::generate()?;
@@ -336,6 +356,7 @@ pub fn start(bind_addr: &str) -> anyhow::Result<ServerHandle> {
     });
 
     // Control channel.
+    let audio_sink = audio.audio_sink.clone();
     let bind = bind_addr.to_owned();
     let active_for_net = active.clone();
     let mic_muted    = Arc::clone(&audio.mic_muted);
@@ -348,5 +369,5 @@ pub fn start(bind_addr: &str) -> anyhow::Result<ServerHandle> {
         }
     });
     let pairing_code = tls.pairing_code.clone();
-    Ok(ServerHandle { active, pairing_code, pending_file_requests: pending, file_send_tx, seamless, mic_muted, capture_tx })
+    Ok(ServerHandle { active, pairing_code, pending_file_requests: pending, file_send_tx, seamless, mic_muted, capture_tx, audio_sink })
 }
