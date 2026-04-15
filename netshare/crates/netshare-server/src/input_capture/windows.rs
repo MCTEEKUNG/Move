@@ -53,24 +53,23 @@ fn is_cursor_visible() -> bool {
         if has_clip {
             let width = rect.right - rect.left;
             let height = rect.bottom - rect.top;
-            let is_visible = width <= 1 && height <= 1;
-            let is_hidden = width > 100 && height > 100;
 
             info!(
-                "GetClipCursor: rect=({},{},{},{}), width={}, height={}, visible={}, hidden={}",
-                rect.left, rect.top, rect.right, rect.bottom, width, height, is_visible, is_hidden
+                "clip: rect=({},{},{},{}), size={}x{}",
+                rect.left, rect.top, rect.right, rect.bottom, width, height
             );
 
-            // If clip is very small (1x1), it's our lock - cursor is visible
-            if width <= 1 && height <= 1 {
+            // If clip is 1x1 (our cursor lock for seamless) - cursor is visible
+            if width == 1 && height == 1 {
                 return true;
             }
-            // If clip covers most of screen, something else locked it (game) - cursor hidden
-            if width > 100 && height > 100 {
+            // Any large clip is likely a game or app locking cursor - block input to client
+            if width > 10 && height > 10 {
+                info!("cursor locked by external app, blocking input to client");
                 return false;
             }
         }
-        // No clip or normal clip - cursor is visible
+        // No clip - cursor is visible
         true
     }
 }
