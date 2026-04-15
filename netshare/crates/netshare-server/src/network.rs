@@ -230,41 +230,41 @@ pub async fn run_server(
                         }
                     }
                 }
-                CaptureEvent::EdgeEnter { slot, entry_x, entry_y, server_edge } => {
-                    // Switch active to this slot.
-                    fan_state.force_active(slot);
-                    // Compute the return edge (opposite of the server edge the cursor crossed).
-                    let return_edge = netshare_core::layout::LayoutConfig::return_edge(server_edge);
-                    // Send CursorEnter to that client.
-                    {
-                        let map = fan_map.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(tx) = map.get(&slot) {
-                            let _ = tx.send(ControlPacket::CursorEnter { x: entry_x, y: entry_y, return_edge });
-                        }
-                    }
+CaptureEvent::EdgeEnter { slot, entry_x, entry_y, server_edge } => {
+                     // NOTE: Do NOT switch active client here—only lock cursor for seamless mouse movement.
+                     // Active client changes only via explicit user action (hotkey/UI).
+                     // Compute the return edge (opposite of the server edge the cursor crossed).
+                     let return_edge = netshare_core::layout::LayoutConfig::return_edge(server_edge);
+                     // Send CursorEnter to that client.
+                     {
+                         let map = fan_map.lock().unwrap_or_else(|e| e.into_inner());
+                         if let Some(tx) = map.get(&slot) {
+                             let _ = tx.send(ControlPacket::CursorEnter { x: entry_x, y: entry_y, return_edge });
+                         }
+                     }
 
-                    // Safety net: if the cursor is still locked to this slot after 5 minutes
-                    // (e.g. topology mismatch where CursorReturn never arrives), auto-release it.
-                    let timeout_seamless = fan_seamless.clone();
-                    let timeout_state    = fan_state.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-                        let still_locked = {
-                            let s = timeout_seamless.lock().unwrap_or_else(|e| e.into_inner());
-                            s.locked_to_slot == Some(slot)
-                        };
-                        if still_locked {
-                            warn!("Auto-releasing cursor lock for slot {slot} after 5-minute safety timeout (topology mismatch?)");
-                            {
-                                let mut s = timeout_seamless.lock().unwrap_or_else(|e| e.into_inner());
-                                s.locked_to_slot = None;
-                            }
-                            timeout_state.force_active(0);
-                            #[cfg(target_os = "windows")]
-                            crate::input_capture::windows::release_cursor();
-                        }
-                    });
-                }
+                     // Safety net: if the cursor is still locked to this slot after 5 minutes
+                     // (e.g. topology mismatch where CursorReturn never arrives), auto-release it.
+                     let timeout_seamless = fan_seamless.clone();
+                     let timeout_state    = fan_state.clone();
+                     tokio::spawn(async move {
+                         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                         let still_locked = {
+                             let s = timeout_seamless.lock().unwrap_or_else(|e| e.into_inner());
+                             s.locked_to_slot == Some(slot)
+                         };
+                         if still_locked {
+                             warn!("Auto-releasing cursor lock for slot {slot} after 5-minute safety timeout (topology mismatch?)");
+                             {
+                                 let mut s = timeout_seamless.lock().unwrap_or_else(|e| e.into_inner());
+                                 s.locked_to_slot = None;
+                             }
+                             timeout_state.force_active(0);
+                             #[cfg(target_os = "windows")]
+                             crate::input_capture::windows::release_cursor();
+                         }
+                     });
+                 }
             }
         }
     });

@@ -349,7 +349,28 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 
         WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
         | WM_MBUTTONUP | WM_XBUTTONDOWN | WM_XBUTTONUP => {
-            let locked = with_seamless(|s| s.locked_to_slot);
+            // Check if cursor is at a client edge (even if not locked) - send click to that PC
+            let x = LAST_X.with(|c| c.get());
+            let y = LAST_Y.with(|c| c.get());
+            let click_target = with_seamless(|s| {
+                if let Some(slot) = s.locked_to_slot {
+                    return Some(slot);
+                }
+                if s.layout.server_width == 0 || s.layout.placements.is_empty() {
+                    return None;
+                }
+                let (vx_min, vy_min, vx_max, vy_max) = s.layout.server_bounds();
+                s.layout.placements.iter().find_map(|(&slot, placement)| {
+                    let on_edge = match placement.edge {
+                        ClientEdge::Right => x >= vx_max - 1,
+                        ClientEdge::Left => x <= vx_min,
+                        ClientEdge::Below => y >= vy_max - 1,
+                        ClientEdge::Above => y <= vy_min,
+                    };
+                    on_edge.then_some(slot)
+                })
+            });
+
             let pkt = match msg {
                 WM_LBUTTONDOWN => Some(mouse_click(MouseButton::Left, ButtonAction::Press, info)),
                 WM_LBUTTONUP => Some(mouse_click(MouseButton::Left, ButtonAction::Release, info)),
@@ -377,15 +398,40 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 _ => None,
             };
             if let Some(pkt) = pkt {
+                if click_target.is_some() {
+                    // Cursor on client edge - forward to that PC, suppress on server
+                    send(CaptureEvent::InputPacket(pkt));
+                    return LRESULT(1);
+                }
+                // Cursor on server - send normally, let server receive it
                 send(CaptureEvent::InputPacket(pkt));
-            }
-            if locked.is_some() {
-                return LRESULT(1); // suppress when locked to a client
             }
             CallNextHookEx(None, code, wparam, lparam)
         }
 
         WM_MOUSEWHEEL => {
+            // Check if cursor is at a client edge - send scroll to that PC
+            let x = LAST_X.with(|c| c.get());
+            let y = LAST_Y.with(|c| c.get());
+            let scroll_target = with_seamless(|s| {
+                if let Some(slot) = s.locked_to_slot {
+                    return Some(slot);
+                }
+                if s.layout.server_width == 0 || s.layout.placements.is_empty() {
+                    return None;
+                }
+                let (vx_min, vy_min, vx_max, vy_max) = s.layout.server_bounds();
+                s.layout.placements.iter().find_map(|(&slot, placement)| {
+                    let on_edge = match placement.edge {
+                        ClientEdge::Right => x >= vx_max - 1,
+                        ClientEdge::Left => x <= vx_min,
+                        ClientEdge::Below => y >= vy_max - 1,
+                        ClientEdge::Above => y <= vy_min,
+                    };
+                    on_edge.then_some(slot)
+                })
+            });
+
             let delta = (info.mouseData >> 16) as i16; // signed wheel delta
             send(CaptureEvent::InputPacket(ControlPacket::Scroll(
                 MouseScroll {
@@ -393,9 +439,8 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     delta_y: delta as i32,
                 },
             )));
-            let locked = with_seamless(|s| s.locked_to_slot);
-            if locked.is_some() {
-                return LRESULT(1);
+            if scroll_target.is_some() {
+                return LRESULT(1); // suppress on server if cursor at client edge
             }
             CallNextHookEx(None, code, wparam, lparam)
         }
