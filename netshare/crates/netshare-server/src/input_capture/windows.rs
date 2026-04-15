@@ -29,7 +29,7 @@ use windows::Win32::{
     UI::{
         Input::KeyboardAndMouse::VK_SCROLL,
         WindowsAndMessaging::{
-            CallNextHookEx, ClipCursor, DispatchMessageW, GetMessageW, SetCursorPos,
+            CallNextHookEx, ClipCursor, DispatchMessageW, GetClipCursor, GetMessageW, SetCursorPos,
             SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG,
             MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
             WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
@@ -40,6 +40,31 @@ use windows::Win32::{
 
 // ── Injected-input flag ───────────────────────────────────────────────────────
 const LLMHF_INJECTED: u32 = 0x01;
+
+// ── Cursor visibility check ─────────────────────────────────────────────
+// Returns true if cursor is visible and not clipped/locked by another app.
+// This prevents input from being forwarded when games hide/lock the cursor.
+fn is_cursor_visible() -> bool {
+    unsafe {
+        // Get current clip rect
+        let mut rect = RECT::default();
+        if GetClipCursor(&mut rect).is_ok() {
+            // Check if it's our clip (single pixel at lock position)
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            // If clip is very small (1x1), it's our lock - cursor is visible
+            if width <= 1 && height <= 1 {
+                return true;
+            }
+            // If clip covers most of screen, something else locked it (game) - cursor hidden
+            if width > 100 && height > 100 {
+                return false;
+            }
+        }
+        // No clip or normal clip - cursor is visible
+        true
+    }
+}
 
 // ── Modifier state ────────────────────────────────────────────────────────
 // Thread-local because the hook callbacks are invoked on this same thread.
@@ -349,6 +374,9 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 
         WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
         | WM_MBUTTONUP | WM_XBUTTONDOWN | WM_XBUTTONUP => {
+            // Only forward to client if cursor is VISIBLE (not locked/hidden by game)
+            let cursor_visible = is_cursor_visible();
+
             // Check if cursor is at a client edge (even if not locked) - send click to that PC
             let x = LAST_X.with(|c| c.get());
             let y = LAST_Y.with(|c| c.get());
@@ -398,18 +426,22 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 _ => None,
             };
             if let Some(pkt) = pkt {
-                if click_target.is_some() {
-                    // Cursor on client edge - forward to that PC, suppress on server
+                // Only forward to client if cursor is visible
+                if cursor_visible && click_target.is_some() {
+                    // Cursor visible + at client edge - forward to that PC, suppress on server
                     send(CaptureEvent::InputPacket(pkt));
                     return LRESULT(1);
                 }
-                // Cursor on server - send normally, let server receive it
+                // Cursor hidden OR on server - send normally to server
                 send(CaptureEvent::InputPacket(pkt));
             }
             CallNextHookEx(None, code, wparam, lparam)
         }
 
         WM_MOUSEWHEEL => {
+            // Only forward to client if cursor is VISIBLE (not locked/hidden by game)
+            let cursor_visible = is_cursor_visible();
+
             // Check if cursor is at a client edge - send scroll to that PC
             let x = LAST_X.with(|c| c.get());
             let y = LAST_Y.with(|c| c.get());
@@ -439,7 +471,8 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     delta_y: delta as i32,
                 },
             )));
-            if scroll_target.is_some() {
+            // Only suppress if cursor is visible AND at client edge
+            if cursor_visible && scroll_target.is_some() {
                 return LRESULT(1); // suppress on server if cursor at client edge
             }
             CallNextHookEx(None, code, wparam, lparam)
