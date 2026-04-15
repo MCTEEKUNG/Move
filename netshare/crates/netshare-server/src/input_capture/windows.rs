@@ -19,7 +19,7 @@ use netshare_core::{
 };
 use std::cell::Cell;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 use windows::Win32::{
     Foundation::{LPARAM, LRESULT, RECT, WPARAM},
     System::Threading::{
@@ -48,10 +48,19 @@ fn is_cursor_visible() -> bool {
     unsafe {
         // Get current clip rect
         let mut rect = RECT::default();
-        if GetClipCursor(&mut rect).is_ok() {
-            // Check if it's our clip (single pixel at lock position)
+        let has_clip = GetClipCursor(&mut rect).is_ok();
+
+        if has_clip {
             let width = rect.right - rect.left;
             let height = rect.bottom - rect.top;
+            let is_visible = width <= 1 && height <= 1;
+            let is_hidden = width > 100 && height > 100;
+
+            info!(
+                "GetClipCursor: rect=({},{},{},{}), width={}, height={}, visible={}, hidden={}",
+                rect.left, rect.top, rect.right, rect.bottom, width, height, is_visible, is_hidden
+            );
+
             // If clip is very small (1x1), it's our lock - cursor is visible
             if width <= 1 && height <= 1 {
                 return true;
