@@ -215,22 +215,13 @@ fn draw_canvas(ui: &mut egui::Ui, app: &mut LocalShareApp) {
         }
 
         if resp.dragged() {
-            let delta  = resp.drag_delta();
-            let raw_sx = app.monitors[i].pos.x * scale + delta.x;
-            let raw_sy = app.monitors[i].pos.y * scale + delta.y;
-            let dw_s   = app.monitors[i].size.x * scale;
-            let dh_s   = app.monitors[i].size.y * scale;
-
-            let others_s: Vec<(f32, f32, f32, f32)> = app.monitors.iter().enumerate()
-                .filter(|(j, _)| *j != i)
-                .map(|(_, m)| (m.pos.x*scale, m.pos.y*scale, m.size.x*scale, m.size.y*scale))
-                .collect();
-
-            let (sx, sy, gh, gv) = apply_snap(raw_sx, raw_sy, dw_s, dh_s, &others_s, cw, ch);
-            app.monitors[i].pos      = vec2(sx, sy) / scale;
-            app.monitors[i].anim_pos = vec2(sx, sy) / scale;
-            snap_out.h = gh;
-            snap_out.v = gv;
+            // Free placement — follow the cursor exactly. Snap guides and
+            // adjacency/wall snaps were fighting the user; Windows Display
+            // Settings just lets you drop monitors wherever, so we do too.
+            let delta = resp.drag_delta();
+            let raw   = app.monitors[i].pos * scale + delta;
+            app.monitors[i].pos      = raw / scale;
+            app.monitors[i].anim_pos = raw / scale;
         }
     }
 
@@ -558,7 +549,7 @@ fn draw_conn_card(
                         });
                         ui.add_space(2.0);
                         let sub = if connected { format!("{} · {} Hz", res, hz) }
-                                  else { "Last seen 4 min ago".into() };
+                                  else { res.to_string() };
                         ui.label(RichText::new(sub).size(10.0).color(muted));
                     });
                 });
@@ -587,16 +578,16 @@ fn draw_conn_card(
 
                     ui.add_space(8.0);
 
-                    // mDNS-discovered peers (no slot yet) are mid-handshake —
-                    // show that as "Connecting…" instead of "Offline" so the
-                    // user sees auto-connect is in flight.
-                    let discovered_only = res.contains("Connecting");
+                    // A non-primary card only exists because we discovered
+                    // the peer — bridge.rs is already auto-dialing it. So
+                    // "not connected" here always means the TCP handshake
+                    // is in flight, never "Offline".
                     let (dot_c, lbl_c, status) = if connected {
                         (green, green, "Active")
-                    } else if discovered_only {
-                        (accent, accent, "Connecting…")
+                    } else if primary {
+                        (subtle, muted, "Idle")
                     } else {
-                        (subtle, muted, "Offline")
+                        (accent, accent, "Connecting…")
                     };
                     ui.label(RichText::new(status).size(10.0).color(lbl_c));
                     let (dr, dp) = ui.allocate_painter(vec2(7.0, 7.0), Sense::hover());
