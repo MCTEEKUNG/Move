@@ -30,6 +30,11 @@ pub struct MonitorInfo {
 pub struct SnapGuides {
     pub h: Option<f32>,
     pub v: Option<f32>,
+    /// The shared edge segment (in canvas-local, *scaled* screen coords)
+    /// between the dragged monitor and whichever other monitor it's
+    /// magnetically snapping against. Rendered as a thick accent line so
+    /// the user sees exactly which border will connect.
+    pub magnet: Option<(egui::Pos2, egui::Pos2)>,
 }
 
 // ── Settings ───────────────────────────────────────────────────────────────

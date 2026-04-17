@@ -4,10 +4,12 @@ use crate::app::{LocalShareApp, SnapGuides, section_label};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const SNAP_ADJ:   f32 = 26.0;
-const SNAP_ALIGN: f32 = 16.0;
-const SNAP_WALL:  f32 = 14.0;
 const LERP:       f32 = 0.55;
+/// Distance (in scaled screen px) within which a dragged monitor's edge
+/// magnetically attaches to another monitor's opposite edge. Generous, so
+/// the pull is obvious — but only along the axis of proximity, never
+/// fighting the user's direction.
+const MAG_THRESH: f32 = 32.0;
 
 fn canvas_h(ui: &egui::Ui) -> f32 {
     (ui.ctx().screen_rect().height() * 0.33).clamp(160.0, 290.0)
@@ -215,13 +217,29 @@ fn draw_canvas(ui: &mut egui::Ui, app: &mut LocalShareApp) {
         }
 
         if resp.dragged() {
-            // Free placement — follow the cursor exactly. Snap guides and
-            // adjacency/wall snaps were fighting the user; Windows Display
-            // Settings just lets you drop monitors wherever, so we do too.
-            let delta = resp.drag_delta();
-            let raw   = app.monitors[i].pos * scale + delta;
-            app.monitors[i].pos      = raw / scale;
-            app.monitors[i].anim_pos = raw / scale;
+            // Cursor-tracking drag with edge-magnet snap. If one of the
+            // dragged monitor's 4 edges gets within MAG_THRESH of another
+            // monitor's opposite edge (and the perpendicular extents
+            // overlap), gently pull it flush so the user sees the border
+            // "connect". Edge endpoints are returned so we can highlight
+            // the shared segment.
+            let delta  = resp.drag_delta();
+            let raw_sx = app.monitors[i].pos.x * scale + delta.x;
+            let raw_sy = app.monitors[i].pos.y * scale + delta.y;
+            let dw_s   = app.monitors[i].size.x * scale;
+            let dh_s   = app.monitors[i].size.y * scale;
+
+            let others_s: Vec<(f32, f32, f32, f32)> = app.monitors.iter().enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, m)| (m.anim_pos.x*scale, m.anim_pos.y*scale,
+                               m.size.x*scale,     m.size.y*scale))
+                .collect();
+
+            let (sx, sy, edge) = magnetic_snap(raw_sx, raw_sy, dw_s, dh_s, &others_s);
+
+            app.monitors[i].pos      = vec2(sx, sy) / scale;
+            app.monitors[i].anim_pos = vec2(sx, sy) / scale;
+            snap_out.magnet = edge;
         }
     }
 
@@ -312,156 +330,103 @@ fn draw_canvas(ui: &mut egui::Ui, app: &mut LocalShareApp) {
         );
     }
 
-    let guide_col = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 140);
-    if let Some(gy) = app.snap_guides.h {
-        let y = cr.top() + gy;
-        if y >= cr.top() && y <= cr.bottom() {
-            painter.hline(cr.x_range(), y, Stroke::new(1.0, guide_col));
-        }
-    }
-    if let Some(gx) = app.snap_guides.v {
-        let x = cr.left() + gx;
-        if x >= cr.left() && x <= cr.right() {
-            painter.vline(x, cr.y_range(), Stroke::new(1.0, guide_col));
-        }
+    // Magnet edge highlight: a bright accent segment along the shared
+    // border between the dragged monitor and whichever neighbor it's
+    // snapping to. Gives the user immediate visual confirmation that
+    // "this edge will connect to that edge".
+    if let Some((a, b)) = app.snap_guides.magnet {
+        let a = cr.min + a.to_vec2();
+        let b = cr.min + b.to_vec2();
+        let glow = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 80);
+        // Soft outer glow, then crisp core line.
+        painter.line_segment([a, b], Stroke::new(6.0, glow));
+        painter.line_segment([a, b], Stroke::new(2.5, accent));
+        // End caps so the "connection" reads clearly even on short edges.
+        painter.circle_filled(a, 3.5, accent);
+        painter.circle_filled(b, 3.5, accent);
     }
 }
 
-fn apply_snap(
+/// Edge-to-edge magnetic snap.
+///
+/// When one of the dragged monitor's four edges lands within MAG_THRESH of
+/// another monitor's opposite edge *and* the perpendicular extents overlap,
+/// snap flush to that edge and return the shared-edge segment so it can
+/// be painted as a "this border will connect" indicator.
+///
+/// Outside the snap zone, returns the cursor position unchanged — no wall
+/// snap, no alignment pulls, no overlap prevention. Mirrors the feel of
+/// Windows Display Settings.
+fn magnetic_snap(
     raw_x: f32, raw_y: f32,
     dw: f32, dh: f32,
     others: &[(f32, f32, f32, f32)],
-    cw: f32, ch: f32,
-) -> (f32, f32, Option<f32>, Option<f32>) {
+) -> (f32, f32, Option<(egui::Pos2, egui::Pos2)>) {
+    let a_right  = raw_x + dw;
+    let a_bottom = raw_y + dh;
 
-    let mut bx = raw_x; let mut by = raw_y;
-    let mut bgh: Option<f32> = None; let mut bgv: Option<f32> = None;
-    let mut bd = f32::MAX;
+    let mut best_d = MAG_THRESH;
+    let mut out_x  = raw_x;
+    let mut out_y  = raw_y;
+    let mut edge: Option<(egui::Pos2, egui::Pos2)> = None;
 
     for &(ox, oy, ow, oh) in others {
-        let dx = (raw_x + dw - ox).abs();
-        if dx < SNAP_ADJ {
-            let sx = ox - dw;
-            let (sy, gh) = align_perp_y(raw_y, dh, oy, oh);
-            let d = dx*dx + (raw_y-sy)*(raw_y-sy);
-            if d < bd { bd=d; bx=sx; by=sy; bgh=gh; bgv=Some(ox); }
+        let o_right  = ox + ow;
+        let o_bottom = oy + oh;
+
+        // Perpendicular overlaps (need >0, not just touching, to avoid
+        // snapping a monitor diagonally off another's corner).
+        let v_overlap = raw_y < o_bottom && a_bottom > oy;
+        let h_overlap = raw_x < o_right  && a_right  > ox;
+
+        if v_overlap {
+            // Dragged right edge ↔ other's left edge.
+            let d = (a_right - ox).abs();
+            if d < best_d {
+                best_d = d;
+                out_x  = ox - dw;
+                out_y  = raw_y;
+                let top = out_y.max(oy);
+                let bot = (out_y + dh).min(o_bottom);
+                edge = Some((egui::pos2(ox, top), egui::pos2(ox, bot)));
+            }
+            // Dragged left edge ↔ other's right edge.
+            let d = (raw_x - o_right).abs();
+            if d < best_d {
+                best_d = d;
+                out_x  = o_right;
+                out_y  = raw_y;
+                let top = out_y.max(oy);
+                let bot = (out_y + dh).min(o_bottom);
+                edge = Some((egui::pos2(o_right, top), egui::pos2(o_right, bot)));
+            }
         }
-        let dx = (raw_x - (ox + ow)).abs();
-        if dx < SNAP_ADJ {
-            let sx = ox + ow;
-            let (sy, gh) = align_perp_y(raw_y, dh, oy, oh);
-            let d = dx*dx + (raw_y-sy)*(raw_y-sy);
-            if d < bd { bd=d; bx=sx; by=sy; bgh=gh; bgv=Some(ox+ow); }
-        }
-        let dy = (raw_y + dh - oy).abs();
-        if dy < SNAP_ADJ {
-            let sy = oy - dh;
-            let (sx, gv) = align_perp_x(raw_x, dw, ox, ow);
-            let d = dy*dy + (raw_x-sx)*(raw_x-sx);
-            if d < bd { bd=d; bx=sx; by=sy; bgh=Some(oy); bgv=gv; }
-        }
-        let dy = (raw_y - (oy + oh)).abs();
-        if dy < SNAP_ADJ {
-            let sy = oy + oh;
-            let (sx, gv) = align_perp_x(raw_x, dw, ox, ow);
-            let d = dy*dy + (raw_x-sx)*(raw_x-sx);
-            if d < bd { bd=d; bx=sx; by=sy; bgh=Some(oy+oh); bgv=gv; }
-        }
-    }
 
-    if bd < f32::MAX {
-        return (bx.clamp(0.0,(cw-dw).max(0.0)), by.clamp(0.0,(ch-dh).max(0.0)), bgh, bgv);
-    }
-
-    let mut x = raw_x; let mut y = raw_y;
-    let mut gv = None;  let mut gh = None;
-    if      x.abs()          < SNAP_WALL { x = 0.0;      gv = Some(0.0); }
-    else if (x+dw-cw).abs()  < SNAP_WALL { x = cw-dw;    gv = Some(cw);  }
-    if      y.abs()          < SNAP_WALL { y = 0.0;      gh = Some(0.0); }
-    else if (y+dh-ch).abs()  < SNAP_WALL { y = ch-dh;    gh = Some(ch);  }
-
-    (x.clamp(0.0,(cw-dw).max(0.0)), y.clamp(0.0,(ch-dh).max(0.0)), gh, gv)
-}
-
-#[inline]
-fn align_perp_y(raw_y: f32, dh: f32, oy: f32, oh: f32) -> (f32, Option<f32>) {
-    let mut best_y = raw_y; let mut best_g = None; let mut best_d = SNAP_ALIGN;
-    for (sy, g) in [
-        (oy,                       Some(oy)),
-        (oy + oh - dh,             Some(oy + oh)),
-        (oy + oh*0.5 - dh*0.5,    Some(oy + oh*0.5)),
-    ] {
-        let d = (sy - raw_y).abs();
-        if d < best_d { best_d = d; best_y = sy; best_g = g; }
-    }
-    (best_y, best_g)
-}
-
-#[inline]
-fn align_perp_x(raw_x: f32, dw: f32, ox: f32, ow: f32) -> (f32, Option<f32>) {
-    let mut best_x = raw_x; let mut best_g = None; let mut best_d = SNAP_ALIGN;
-    for (sx, g) in [
-        (ox,                       Some(ox)),
-        (ox + ow - dw,             Some(ox + ow)),
-        (ox + ow*0.5 - dw*0.5,    Some(ox + ow*0.5)),
-    ] {
-        let d = (sx - raw_x).abs();
-        if d < best_d { best_d = d; best_x = sx; best_g = g; }
-    }
-    (best_x, best_g)
-}
-
-fn is_adjacent_to_any(pos: Vec2, size: Vec2, others: &[(Vec2, Vec2)]) -> bool {
-    const EPS: f32 = 4.0;
-    let (ax1, ax2) = (pos.x, pos.x + size.x);
-    let (ay1, ay2) = (pos.y, pos.y + size.y);
-    for &(op, os) in others {
-        let (bx1, bx2) = (op.x, op.x + os.x);
-        let (by1, by2) = (op.y, op.y + os.y);
-        if ((ax2-bx1).abs() < EPS || (bx2-ax1).abs() < EPS) && ay1 < by2-EPS && by1 < ay2-EPS { return true; }
-        if ((ay2-by1).abs() < EPS || (by2-ay1).abs() < EPS) && ax1 < bx2-EPS && bx1 < ax2-EPS { return true; }
-    }
-    false
-}
-
-fn nearest_adjacent(pos: Vec2, size: Vec2, others: &[(Vec2, Vec2)], cw: f32, ch: f32) -> Vec2 {
-    let mut best = pos; let mut best_d = f32::MAX;
-    for &(op, os) in others {
-        let cy = (op.y + os.y*0.5 - size.y*0.5).clamp(0.0, (ch-size.y).max(0.0));
-        let cx = (op.x + os.x*0.5 - size.x*0.5).clamp(0.0, (cw-size.x).max(0.0));
-        for cand in [
-            vec2(op.x+os.x, cy), vec2(op.x-size.x, cy),
-            vec2(cx, op.y+os.y), vec2(cx, op.y-size.y),
-        ] {
-            let c = vec2(cand.x.clamp(0.0,(cw-size.x).max(0.0)), cand.y.clamp(0.0,(ch-size.y).max(0.0)));
-            let d = (c-pos).length();
-            if d < best_d { best_d=d; best=c; }
-        }
-    }
-    best
-}
-
-fn resolve_overlaps(monitors: &mut Vec<crate::app::MonitorInfo>, ncw: f32) {
-    let n = monitors.len();
-    if n < 2 { return; }
-
-    let mut ids: Vec<usize> = (0..n).collect();
-    ids.sort_by(|&a, &b| monitors[a].pos.x.total_cmp(&monitors[b].pos.x));
-    for k in 1..ids.len() {
-        let (prev, curr) = (ids[k - 1], ids[k]);
-        let min_x = monitors[prev].pos.x + monitors[prev].size.x;
-        if monitors[curr].pos.x < min_x - 0.5 {
-            monitors[curr].pos.x = (min_x).min((ncw - monitors[curr].size.x).max(0.0));
+        if h_overlap {
+            // Dragged bottom edge ↔ other's top edge.
+            let d = (a_bottom - oy).abs();
+            if d < best_d {
+                best_d = d;
+                out_x  = raw_x;
+                out_y  = oy - dh;
+                let left  = out_x.max(ox);
+                let right = (out_x + dw).min(o_right);
+                edge = Some((egui::pos2(left, oy), egui::pos2(right, oy)));
+            }
+            // Dragged top edge ↔ other's bottom edge.
+            let d = (raw_y - o_bottom).abs();
+            if d < best_d {
+                best_d = d;
+                out_x  = raw_x;
+                out_y  = o_bottom;
+                let left  = out_x.max(ox);
+                let right = (out_x + dw).min(o_right);
+                edge = Some((egui::pos2(left, o_bottom), egui::pos2(right, o_bottom)));
+            }
         }
     }
 
-    for k in (0..ids.len() - 1).rev() {
-        let (curr, next) = (ids[k], ids[k + 1]);
-        let max_x = monitors[next].pos.x - monitors[curr].size.x;
-        if monitors[curr].pos.x > max_x + 0.5 {
-            monitors[curr].pos.x = max_x.max(0.0);
-        }
-    }
+    (out_x, out_y, edge)
 }
 
 fn draw_connections(ui: &mut egui::Ui, app: &mut LocalShareApp) {
