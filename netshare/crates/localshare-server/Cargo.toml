@@ -1,0 +1,26 @@
+[package]
+name    = "localshare-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+localshare-core = { path = "../localshare-core" }
+tokio         = { workspace = true }
+serde         = { workspace = true }
+bincode       = { workspace = true }
+tracing       = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = "1"
+cpal       = "0.15"
+opus       = "0.3"
+sha2       = "0.10"
+crc32fast  = "1.4"
+arboard    = "3"
+walkdir    = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_UI_WindowsAndMessaging",       # SetWindowsHookEx, WH_MOUSE_LL, WH_KEYBOARD_LL
+    "Win32_UI_Input_KeyboardAndMouse",    # KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT
+    "Win32_Foundation",                   # WPARAM, LPARAM, LRESULT, HWND, BOOL
+] }

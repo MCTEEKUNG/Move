@@ -1,0 +1,12 @@
+[package]
+name    = "localshare-discovery"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+localshare-core = { path = "../localshare-core" }
+anyhow          = "1"
+mdns-sd         = "0.11"
+serde           = { workspace = true }
+tokio           = { workspace = true }
+tracing         = { workspace = true }

@@ -1,9 +1,11 @@
 [workspace]
 members = [
-    "crates/netshare-core",
-    "crates/netshare-server",
-    "crates/netshare-client",
-    "crates/netshare-gui",
+    "crates/localshare-core",
+    "crates/localshare-discovery",
+    "crates/localshare-server",
+    "crates/localshare-client",
+    "crates/localshare-gui",
+    "crates/localshare-daemon",
 ]
 resolver = "2"
 
