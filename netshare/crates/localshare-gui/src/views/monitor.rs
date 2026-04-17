@@ -7,7 +7,7 @@ use crate::app::{LocalShareApp, SnapGuides, section_label};
 const SNAP_ADJ:   f32 = 26.0;
 const SNAP_ALIGN: f32 = 16.0;
 const SNAP_WALL:  f32 = 14.0;
-const LERP:       f32 = 0.28;
+const LERP:       f32 = 0.55;
 
 fn canvas_h(ui: &egui::Ui) -> f32 {
     (ui.ctx().screen_rect().height() * 0.33).clamp(160.0, 290.0)
@@ -105,9 +105,9 @@ fn draw_canvas(ui: &mut egui::Ui, app: &mut LocalShareApp) {
         mon.pos.x = mon.pos.x.clamp(0.0, (ncw - mon.size.x).max(0.0));
         mon.pos.y = mon.pos.y.clamp(0.0, (nch - mon.size.y).max(0.0));
     }
-    if app.dragging_id.is_none() {
-        resolve_overlaps(&mut app.monitors, ncw);
-    }
+    // NOTE: resolve_overlaps() disabled — it fought the user every frame by
+    // pushing monitors back along X. Overlaps are now allowed; users can
+    // arrange freely.
 
     let mut animating = false;
     for (i, mon) in app.monitors.iter_mut().enumerate() {
@@ -164,28 +164,27 @@ fn draw_canvas(ui: &mut egui::Ui, app: &mut LocalShareApp) {
     let mut snap_out     = SnapGuides::default();
 
     for &i in &order {
-        let s_pos  = app.monitors[i].pos  * scale;
-        let s_size = app.monitors[i].size * scale;
+        // Hit-test against the *visible* rect (anim_pos), not the target.
+        // Using `pos` here meant that while a monitor was still lerping
+        // into place the click target was somewhere the user couldn't see,
+        // so grabbing it felt unresponsive.
+        let s_pos  = app.monitors[i].anim_pos * scale;
+        let s_size = app.monitors[i].size     * scale;
         let hit    = Rect::from_min_size(cr.min + s_pos, s_size);
         let id     = egui::Id::new("mon_drag").with(i);
         let resp   = ui.interact(hit, id, Sense::drag());
 
-        if resp.drag_started()                           { new_dragging = Some(i); }
+        if resp.drag_started() {
+            new_dragging = Some(i);
+            // Sync target to visible so the first drag frame doesn't teleport
+            // to wherever `pos` was still heading.
+            app.monitors[i].pos = app.monitors[i].anim_pos;
+        }
         if resp.drag_stopped() && new_dragging == Some(i) {
             new_dragging = None;
-            if n > 1 {
-                let s_p = app.monitors[i].pos  * scale;
-                let s_s = app.monitors[i].size * scale;
-                let others_s: Vec<(Vec2, Vec2)> = app.monitors.iter().enumerate()
-                    .filter(|(j, _)| *j != i)
-                    .map(|(_, m)| (m.pos * scale, m.size * scale))
-                    .collect();
-                if !is_adjacent_to_any(s_p, s_s, &others_s) {
-                    let new_s = nearest_adjacent(s_p, s_s, &others_s, cw, ch);
-                    app.monitors[i].pos = new_s / scale;
-                    ui.ctx().request_repaint();
-                }
-            }
+            // NOTE: previously teleported to `nearest_adjacent` if the monitor
+            // wasn't touching another — that made releasing feel like the
+            // monitor jumped away from you. Free placement now.
         }
 
         if resp.dragged() {
