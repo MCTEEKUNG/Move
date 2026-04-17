@@ -140,23 +140,27 @@ impl LocalShareApp {
 
     pub fn sync_from_server(&mut self) {
         let snapshot = self.bridge.state.snapshot();
+        let discovered = self.bridge.discovered.lock().unwrap().clone();
 
-        let mut slot_pos: HashMap<u8, (egui::Vec2, egui::Vec2)> = HashMap::new();
+        // Remember existing positions keyed by host name (stable across TCP
+        // reconnects and slot reassignments).
+        let mut host_pos: HashMap<String, (egui::Vec2, egui::Vec2)> = HashMap::new();
         for mon in self.monitors.iter().skip(1) {
-            if let Some(s) = mon.slot {
-                slot_pos.insert(s, (mon.pos, mon.anim_pos));
-            }
+            host_pos.insert(mon.host.clone(), (mon.pos, mon.anim_pos));
         }
 
         let primary = self.monitors[0].clone();
         let mut new_mons = vec![primary];
+        let mut seen_hosts: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+        // 1) Connected TCP clients (real slots, can switch input to them).
         for (i, snap) in snapshot.iter().enumerate() {
-            let (pos, anim_pos) = slot_pos.get(&snap.slot).copied().unwrap_or_else(|| {
+            let (pos, anim_pos) = host_pos.get(&snap.name).copied().unwrap_or_else(|| {
                 let last = new_mons.last().unwrap();
                 let p = egui::vec2(last.pos.x + last.size.x, last.pos.y);
                 (p, p)
             });
+            seen_hosts.insert(snap.name.clone());
             new_mons.push(MonitorInfo {
                 slot:       Some(snap.slot),
                 label:      format!("Monitor {}", i + 2),
@@ -171,18 +175,45 @@ impl LocalShareApp {
             });
         }
 
+        // 2) Discovered-via-mDNS-but-not-TCP-connected peers. Show them as
+        //    offline placeholders so the user sees "yes, we see the other PC,
+        //    just couldn't finish the handshake (likely firewall)".
+        for peer in discovered.iter() {
+            if seen_hosts.contains(&peer.name) { continue; }
+            let (pos, anim_pos) = host_pos.get(&peer.name).copied().unwrap_or_else(|| {
+                let last = new_mons.last().unwrap();
+                let p = egui::vec2(last.pos.x + last.size.x, last.pos.y);
+                (p, p)
+            });
+            let label = format!("Monitor {}", new_mons.len() + 1);
+            new_mons.push(MonitorInfo {
+                slot:       None, // no TCP slot yet
+                label,
+                host:       peer.name.clone(),
+                resolution: format!("{} · mDNS", peer.addr),
+                hz:         0,
+                connected:  false,
+                active:     false,
+                pos,
+                anim_pos,
+                size:       egui::vec2(76.0, 52.0),
+            });
+        }
+
         let active_slot = self.bridge.state.active_slot();
         new_mons[0].active = active_slot == 0;
 
-        let old_slots: Vec<_> = self.monitors.iter().skip(1).filter_map(|m| m.slot).collect();
-        let new_slots: Vec<_> = snapshot.iter().map(|s| s.slot).collect();
-        if old_slots != new_slots {
+        // Replace when the set of hosts changed; otherwise just refresh flags
+        // in place so drag positions don't get reset every frame.
+        let old_hosts: Vec<String> = self.monitors.iter().skip(1).map(|m| m.host.clone()).collect();
+        let new_hosts: Vec<String> = new_mons.iter().skip(1).map(|m| m.host.clone()).collect();
+        if old_hosts != new_hosts {
             self.monitors = new_mons;
         } else {
-            for mon in self.monitors.iter_mut() {
-                if let Some(s) = mon.slot {
-                    mon.active = snapshot.iter().any(|snap| snap.slot == s && snap.is_active);
-                }
+            for mon in self.monitors.iter_mut().skip(1) {
+                mon.active = snapshot.iter()
+                    .any(|snap| snap.name == mon.host && snap.is_active);
+                mon.connected = snapshot.iter().any(|snap| snap.name == mon.host);
             }
             self.monitors[0].active = active_slot == 0;
         }

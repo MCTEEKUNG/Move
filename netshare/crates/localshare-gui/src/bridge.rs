@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock, atomic::{AtomicBool, Ordering}};
 use tokio::sync::mpsc;
 
-use localshare_discovery::{Discovery, Peer, PeerEvent};
+use localshare_discovery::{Discovery, Peer};
 use localshare_server::active_client::ActiveClientState;
 use localshare_server::audio::ServerAudio;
 
@@ -230,7 +230,11 @@ fn start_discovery() -> (Arc<Mutex<Vec<Peer>>>, Option<Arc<Discovery>>) {
 
     let peers_shared: Arc<Mutex<Vec<Peer>>> = Arc::new(Mutex::new(Vec::new()));
 
-    // Drive a background tokio runtime to receive PeerEvents + spawn connect tasks
+    // Poll Discovery::peers() every second. This avoids the
+    // subscribe-after-start race with broadcast channels (any PeerEvent sent
+    // before subscribe() is lost). Discovery maintains its own canonical
+    // peer map — we just mirror it into `peers_shared` and spawn a dial task
+    // for each newly-seen peer.
     {
         let peers_shared = Arc::clone(&peers_shared);
         let disco2 = Arc::clone(&disco);
@@ -239,36 +243,29 @@ fn start_discovery() -> (Arc<Mutex<Vec<Peer>>>, Option<Arc<Discovery>>) {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all().build().expect("tokio (discovery)");
             rt.block_on(async move {
-                let mut rx = disco2.subscribe();
-                let mut connected: HashSet<String> = HashSet::new();
+                let mut dialed: HashSet<String> = HashSet::new();
                 loop {
-                    match rx.recv().await {
-                        Ok(PeerEvent::Added(peer)) => {
-                            tracing::info!("Discovered peer {} @ {}", peer.name, peer.addr);
-                            {
-                                let mut list = peers_shared.lock().unwrap();
-                                if !list.iter().any(|p| p.name == peer.name) {
-                                    list.push(peer.clone());
+                    let peers_now = disco2.peers();
+                    tracing::debug!("mDNS peers visible: {}", peers_now.len());
+
+                    // Refresh the UI-visible list.
+                    *peers_shared.lock().unwrap() = peers_now.clone();
+
+                    // Dial new ones.
+                    for peer in &peers_now {
+                        if dialed.insert(peer.name.clone()) {
+                            tracing::info!("Dialing newly discovered peer {} @ {}:{}", peer.name, peer.addr, peer.port);
+                            let addr: SocketAddr = (std::net::IpAddr::V4(peer.addr), peer.port).into();
+                            let me = host2.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = dial_peer(addr, me).await {
+                                    tracing::warn!("Connect to {addr} failed: {e}");
                                 }
-                            }
-                            if connected.insert(peer.name.clone()) {
-                                let addr: SocketAddr = (std::net::IpAddr::V4(peer.addr), peer.port).into();
-                                let me = host2.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = dial_peer(addr, me).await {
-                                        tracing::warn!("Connect to {addr} failed: {e}");
-                                    }
-                                });
-                            }
+                            });
                         }
-                        Ok(PeerEvent::Removed(name)) => {
-                            tracing::info!("Peer gone: {name}");
-                            peers_shared.lock().unwrap().retain(|p| p.name != name);
-                            connected.remove(&name);
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(_) => break,
                     }
+
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             });
         });
