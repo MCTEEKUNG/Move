@@ -124,9 +124,19 @@ impl Discovery {
         let event_tx = self.event_tx.clone();
         let my_name  = self.host_name.clone();
 
+        info!("mDNS: browse started for {}", SERVICE_TYPE);
         std::thread::spawn(move || {
             while let Ok(event) = receiver.recv() {
                 match event {
+                    ServiceEvent::SearchStarted(s) => {
+                        info!("mDNS: SearchStarted ({})", s);
+                    }
+                    ServiceEvent::ServiceFound(ty, fullname) => {
+                        info!("mDNS: ServiceFound ty={} name={}", ty, fullname);
+                    }
+                    ServiceEvent::SearchStopped(s) => {
+                        info!("mDNS: SearchStopped ({})", s);
+                    }
                     ServiceEvent::ServiceResolved(info) => {
                         let name = info.get_fullname()
                             .trim_end_matches(&format!(".{}", SERVICE_TYPE))
