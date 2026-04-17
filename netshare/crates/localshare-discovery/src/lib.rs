@@ -102,17 +102,28 @@ impl Discovery {
             ("version", env!("CARGO_PKG_VERSION")),
         ];
 
+        // Detect the outbound-facing local IP by opening a throwaway UDP
+        // socket to a public address (no packets are actually sent). This
+        // matches the old netshare-gui approach and works reliably across
+        // multi-NIC Windows hosts where "" / UNSPECIFIED makes mdns-sd
+        // advertise an address peers can't reach.
+        let local_ip = detect_local_ip()
+            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+
         let info = ServiceInfo::new(
             SERVICE_TYPE,
             &self.host_name,
             &format!("{}.local.", self.host_name),
-            "",          // let mdns-sd pick the local IP
+            local_ip,
             self.port,
             &props[..],
         )?;
 
         self.daemon.register(info)?;
-        info!("mDNS: announced '{}' on port {}", self.host_name, self.port);
+        info!(
+            "mDNS: announced '{}' at {} on port {}",
+            self.host_name, local_ip, self.port
+        );
         Ok(())
     }
 
@@ -177,4 +188,13 @@ impl Discovery {
             }
         });
     }
+}
+
+/// Open a throwaway UDP socket to a public address to learn which local IP
+/// the OS would use for outbound traffic. No packets are actually sent — we
+/// just ask the kernel to pick a source address.
+fn detect_local_ip() -> Option<IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    sock.local_addr().ok().map(|a| a.ip())
 }
