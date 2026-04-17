@@ -101,6 +101,31 @@ fn draw_canvas(ui: &mut egui::Ui, app: &mut LocalShareApp) {
     let ncw = cw / scale;
     let nch = ch / scale;
 
+    // Auto-center the primary monitor the first time we lay out, and on
+    // canvas resize while the user hasn't dragged yet. Once the user starts
+    // dragging anything, `primary_placed` latches true and we leave their
+    // layout alone.
+    let canvas_size = vec2(cw, ch);
+    let resized = (canvas_size - app.last_canvas_size).length() > 0.5;
+    if !app.monitors.is_empty()
+        && app.dragging_id.is_none()
+        && (!app.primary_placed || resized)
+    {
+        let primary_size = app.monitors[0].size;
+        let cx = (ncw - primary_size.x) * 0.5;
+        let cy = (nch - primary_size.y) * 0.5;
+        let centered = vec2(cx.max(0.0), cy.max(0.0));
+        let delta = centered - app.monitors[0].pos;
+        // Shift all monitors by the same offset so the user's arrangement
+        // (peers dropped at specific offsets to primary) doesn't break.
+        for mon in app.monitors.iter_mut() {
+            mon.pos      += delta;
+            mon.anim_pos += delta;
+        }
+        app.primary_placed   = true;
+        app.last_canvas_size = canvas_size;
+    }
+
     for mon in app.monitors.iter_mut() {
         mon.pos.x = mon.pos.x.clamp(0.0, (ncw - mon.size.x).max(0.0));
         mon.pos.y = mon.pos.y.clamp(0.0, (nch - mon.size.y).max(0.0));
@@ -176,6 +201,8 @@ fn draw_canvas(ui: &mut egui::Ui, app: &mut LocalShareApp) {
 
         if resp.drag_started() {
             new_dragging = Some(i);
+            // User has taken over layout — stop auto-centering on resize.
+            app.primary_placed = true;
             // Sync target to visible so the first drag frame doesn't teleport
             // to wherever `pos` was still heading.
             app.monitors[i].pos = app.monitors[i].anim_pos;
@@ -560,8 +587,17 @@ fn draw_conn_card(
 
                     ui.add_space(8.0);
 
-                    let (dot_c, lbl_c, status) = if connected { (green, green, "Active") }
-                                                 else { (subtle, muted, "Offline") };
+                    // mDNS-discovered peers (no slot yet) are mid-handshake —
+                    // show that as "Connecting…" instead of "Offline" so the
+                    // user sees auto-connect is in flight.
+                    let discovered_only = res.contains("Connecting");
+                    let (dot_c, lbl_c, status) = if connected {
+                        (green, green, "Active")
+                    } else if discovered_only {
+                        (accent, accent, "Connecting…")
+                    } else {
+                        (subtle, muted, "Offline")
+                    };
                     ui.label(RichText::new(status).size(10.0).color(lbl_c));
                     let (dr, dp) = ui.allocate_painter(vec2(7.0, 7.0), Sense::hover());
                     dp.circle_filled(dr.rect.center(), 3.0, dot_c);

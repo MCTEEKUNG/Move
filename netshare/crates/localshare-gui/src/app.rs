@@ -57,6 +57,13 @@ pub struct LocalShareApp {
     pub audio_devs:  Vec<String>,
     pub snap_guides: SnapGuides,
     pub dragging_id: Option<usize>,
+    /// `false` until the primary monitor has been auto-centered (or the user
+    /// drags it). Lets the canvas re-center on window resize before the user
+    /// touches anything.
+    pub primary_placed: bool,
+    /// Last canvas size we centered for — if it changes and user hasn't
+    /// dragged, re-center.
+    pub last_canvas_size: egui::Vec2,
     prev_dark:       bool,
     pub bridge:      crate::bridge::ServerBridge,
 }
@@ -121,7 +128,10 @@ impl LocalShareApp {
         Self {
             page: Page::Monitor, settings, monitors, audio_devs,
             snap_guides: SnapGuides::default(),
-            dragging_id: None, prev_dark,
+            dragging_id: None,
+            primary_placed: false,
+            last_canvas_size: vec2(0.0, 0.0),
+            prev_dark,
             bridge,
         }
     }
@@ -186,11 +196,16 @@ impl LocalShareApp {
                 (p, p)
             });
             let label = format!("Monitor {}", new_mons.len() + 1);
+            // Auto-connecting: bridge.rs spawned a dial_peer task for this
+            // host as soon as mDNS saw it. It becomes a real slot (below)
+            // once the TCP handshake completes on the peer's side and they
+            // dial us back. Surface that as "Connecting…" so the user sees
+            // progress instead of a bare "Offline".
             new_mons.push(MonitorInfo {
                 slot:       None, // no TCP slot yet
                 label,
                 host:       peer.name.clone(),
-                resolution: format!("{} · mDNS", peer.addr),
+                resolution: format!("{} · Connecting…", peer.addr),
                 hz:         0,
                 connected:  false,
                 active:     false,
