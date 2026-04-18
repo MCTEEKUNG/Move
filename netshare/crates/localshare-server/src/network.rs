@@ -168,8 +168,16 @@ async fn handle_client(
             )),
         });
         write_packet(&mut writer, &resp, 0).await?;
-        return Ok(());
+        anyhow::bail!(
+            "Hello rejected: version mismatch (server={PROTOCOL_VERSION} \
+             client={} from='{}')",
+            hello.protocol_version, hello.client_name
+        );
     }
+    info!(
+        "Hello from '{}' (version {}) accepted",
+        hello.client_name, hello.protocol_version
+    );
 
     let slot = state.register(hello.client_name.clone(), peer);
     info!("Client '{}' → slot {slot} (peer {peer})", hello.client_name);
