@@ -156,6 +156,7 @@ impl LocalShareApp {
     pub fn sync_from_server(&mut self) {
         let snapshot = self.bridge.state.snapshot();
         let discovered = self.bridge.discovered.lock().unwrap().clone();
+        let outbound  = self.bridge.outbound_connected.lock().unwrap().clone();
 
         // Remember existing positions keyed by host name (stable across TCP
         // reconnects and slot reassignments).
@@ -202,17 +203,22 @@ impl LocalShareApp {
             });
             let label = format!("Monitor {}", new_mons.len() + 1);
             // Auto-connecting: bridge.rs spawned a dial_peer task for this
-            // host as soon as mDNS saw it. It becomes a real slot (below)
-            // once the TCP handshake completes on the peer's side and they
-            // dial us back. Surface that as "Connecting…" so the user sees
-            // progress instead of a bare "Offline".
+            // host as soon as mDNS saw it. If our outbound handshake to this
+            // peer is live, mark it Connected even when the peer hasn't
+            // dialed us back (asymmetric firewall case). Otherwise show
+            // "Connecting…" so the user sees progress instead of "Offline".
+            let is_outbound = outbound.contains(&peer.name);
             new_mons.push(MonitorInfo {
-                slot:       None, // no TCP slot yet
+                slot:       None, // no inbound TCP slot yet
                 label,
                 host:       peer.name.clone(),
-                resolution: format!("{} · Connecting…", peer.addr),
-                hz:         0,
-                connected:  false,
+                resolution: if is_outbound {
+                    format!("{} · Connected", peer.addr)
+                } else {
+                    format!("{} · Connecting…", peer.addr)
+                },
+                hz:         if is_outbound { 60 } else { 0 },
+                connected:  is_outbound,
                 active:     false,
                 pos,
                 anim_pos,
@@ -231,9 +237,10 @@ impl LocalShareApp {
             self.monitors = new_mons;
         } else {
             for mon in self.monitors.iter_mut().skip(1) {
+                let inbound = snapshot.iter().any(|snap| snap.name == mon.host);
                 mon.active = snapshot.iter()
                     .any(|snap| snap.name == mon.host && snap.is_active);
-                mon.connected = snapshot.iter().any(|snap| snap.name == mon.host);
+                mon.connected = inbound || outbound.contains(&mon.host);
             }
             self.monitors[0].active = active_slot == 0;
         }

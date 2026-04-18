@@ -23,6 +23,11 @@ pub struct ServerBridge {
     /// Peers discovered on the LAN via mDNS (may include peers we aren't yet
     /// connected to).
     pub discovered:    Arc<Mutex<Vec<Peer>>>,
+    /// Peers we've successfully handshaked with via *outbound* `dial_peer`.
+    /// The server-side `ActiveClientState` only tracks *inbound* clients, so
+    /// without this the UI would never flip an asymmetric-firewall peer to
+    /// "Connected" even though our outbound dial is live and healthy.
+    pub outbound_connected: Arc<Mutex<HashSet<String>>>,
     /// Keep Discovery alive for the lifetime of the bridge.
     _discovery:        Option<Arc<Discovery>>,
 }
@@ -37,6 +42,8 @@ impl ServerBridge {
         let (switch_tx, switch_rx) = mpsc::unbounded_channel::<u8>();
         let audio_lock: Arc<OnceLock<Arc<ServerAudio>>> = Arc::new(OnceLock::new());
         let audio_devices = list_audio_output_devices();
+        let outbound_connected: Arc<Mutex<HashSet<String>>> =
+            Arc::new(Mutex::new(HashSet::new()));
 
         if daemon_running {
             tracing::info!("Bridge: connecting to running daemon via IPC");
@@ -50,11 +57,11 @@ impl ServerBridge {
                     .expect("tokio");
                 rt.block_on(ipc_sync_loop(state_ipc, switch_tx_ipc, share_ipc, switch_rx));
             });
-            let (discovered, _discovery) = start_discovery();
+            let (discovered, _discovery) = start_discovery(Arc::clone(&outbound_connected));
             return Self {
                 state, switch_tx, share_input, audio: audio_lock,
                 daemon_mode: true, audio_devices,
-                discovered, _discovery,
+                discovered, outbound_connected, _discovery,
             };
         }
 
@@ -94,12 +101,12 @@ impl ServerBridge {
             });
         });
 
-        let (discovered, _discovery) = start_discovery();
+        let (discovered, _discovery) = start_discovery(Arc::clone(&outbound_connected));
 
         Self {
             state, switch_tx, share_input, audio: audio_lock,
             daemon_mode: false, audio_devices,
-            discovered, _discovery,
+            discovered, outbound_connected, _discovery,
         }
     }
 
@@ -214,7 +221,9 @@ fn hostname() -> String {
 /// For every newly-discovered peer, spawns a background task that dials its
 /// server and keeps a minimal client handshake alive — so this PC appears as a
 /// connected slot on the peer's server.
-fn start_discovery() -> (Arc<Mutex<Vec<Peer>>>, Option<Arc<Discovery>>) {
+fn start_discovery(
+    outbound_connected: Arc<Mutex<HashSet<String>>>,
+) -> (Arc<Mutex<Vec<Peer>>>, Option<Arc<Discovery>>) {
     let host  = hostname();
     let disco = match Discovery::new(&host, 9000) {
         Ok(d)  => Arc::new(d),
@@ -256,9 +265,11 @@ fn start_discovery() -> (Arc<Mutex<Vec<Peer>>>, Option<Arc<Discovery>>) {
                         if dialed.insert(peer.name.clone()) {
                             tracing::info!("Dialing newly discovered peer {} @ {}:{}", peer.name, peer.addr, peer.port);
                             let addr: SocketAddr = (std::net::IpAddr::V4(peer.addr), peer.port).into();
-                            let me = host2.clone();
+                            let me        = host2.clone();
+                            let peer_name = peer.name.clone();
+                            let connected = Arc::clone(&outbound_connected);
                             tokio::spawn(async move {
-                                if let Err(e) = dial_peer(addr, me).await {
+                                if let Err(e) = dial_peer(addr, me, peer_name, connected).await {
                                     tracing::warn!("Connect to {addr} failed: {e}");
                                 }
                             });
@@ -278,7 +289,12 @@ fn start_discovery() -> (Arc<Mutex<Vec<Peer>>>, Option<Arc<Discovery>>) {
 /// Doesn't inject input — this task exists only so our PC appears as a connected
 /// slot on the peer's server (and later to receive input packets when this PC
 /// becomes the active slot there).
-async fn dial_peer(addr: SocketAddr, client_name: String) -> anyhow::Result<()> {
+async fn dial_peer(
+    addr: SocketAddr,
+    client_name: String,
+    peer_name: String,
+    outbound_connected: Arc<Mutex<HashSet<String>>>,
+) -> anyhow::Result<()> {
     use tokio::io::BufWriter;
     use tokio::net::TcpStream;
     use localshare_core::{
@@ -299,22 +315,26 @@ async fn dial_peer(addr: SocketAddr, client_name: String) -> anyhow::Result<()> 
 
                 // Read HelloResponse
                 let (_, pkt) = read_packet(&mut reader).await?;
-                match pkt {
+                let accepted = match pkt {
                     ControlPacket::HelloResponse(r) if r.accepted => {
                         tracing::info!("Peer {} accepted us as slot {}", r.server_name, r.assigned_slot);
+                        outbound_connected.lock().unwrap().insert(peer_name.clone());
+                        true
                     }
                     ControlPacket::HelloResponse(r) => {
                         anyhow::bail!("Peer rejected: {}", r.reject_reason.unwrap_or_default());
                     }
                     other => anyhow::bail!("Peer sent unexpected packet: {:?}", other),
-                }
+                };
 
                 // Keep-alive: echo heartbeats, ignore input packets (no injector yet
                 // on the GUI side — full client binary still handles that).
                 loop {
                     match read_packet(&mut reader).await {
                         Ok((_, ControlPacket::Heartbeat)) => {
-                            write_packet(&mut writer, &ControlPacket::Heartbeat, 0).await?;
+                            if write_packet(&mut writer, &ControlPacket::Heartbeat, 0).await.is_err() {
+                                break;
+                            }
                         }
                         Ok((_, ControlPacket::Disconnect)) => break,
                         Ok(_) => {} // ignore everything else for now
@@ -323,6 +343,10 @@ async fn dial_peer(addr: SocketAddr, client_name: String) -> anyhow::Result<()> 
                             break;
                         }
                     }
+                }
+
+                if accepted {
+                    outbound_connected.lock().unwrap().remove(&peer_name);
                 }
             }
             Err(e) => {
