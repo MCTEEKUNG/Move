@@ -28,6 +28,10 @@ pub struct ServerBridge {
     /// without this the UI would never flip an asymmetric-firewall peer to
     /// "Connected" even though our outbound dial is live and healthy.
     pub outbound_connected: Arc<Mutex<HashSet<String>>>,
+    /// Layout-aware edge triggers (which screen edge → which slot). Written
+    /// by the GUI from the monitor canvas arrangement, read by the edge
+    /// polling thread.
+    pub edges:         crate::edge::EdgeLayout,
     /// Keep Discovery alive for the lifetime of the bridge.
     _discovery:        Option<Arc<Discovery>>,
 }
@@ -44,6 +48,12 @@ impl ServerBridge {
         let audio_devices = list_audio_output_devices();
         let outbound_connected: Arc<Mutex<HashSet<String>>> =
             Arc::new(Mutex::new(HashSet::new()));
+        let edges: crate::edge::EdgeLayout =
+            Arc::new(Mutex::new(Vec::new()));
+
+        // Edge-crossing: cursor dwell at a screen edge → switch_to(slot).
+        // Layout is fed in from the GUI each sync_from_server tick.
+        crate::edge::spawn(Arc::clone(&edges), switch_tx.clone());
 
         if daemon_running {
             tracing::info!("Bridge: connecting to running daemon via IPC");
@@ -61,7 +71,7 @@ impl ServerBridge {
             return Self {
                 state, switch_tx, share_input, audio: audio_lock,
                 daemon_mode: true, audio_devices,
-                discovered, outbound_connected, _discovery,
+                discovered, outbound_connected, edges, _discovery,
             };
         }
 
@@ -106,7 +116,7 @@ impl ServerBridge {
         Self {
             state, switch_tx, share_input, audio: audio_lock,
             daemon_mode: false, audio_devices,
-            discovered, outbound_connected, _discovery,
+            discovered, outbound_connected, edges, _discovery,
         }
     }
 
@@ -303,9 +313,21 @@ async fn dial_peer(
     };
 
     // Retry loop: if the peer isn't accepting yet, wait and try again.
+    let mut attempt: u32 = 0;
     loop {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => {
+        attempt += 1;
+        let connect_fut = TcpStream::connect(addr);
+        let timed = tokio::time::timeout(
+            std::time::Duration::from_secs(3), connect_fut,
+        ).await;
+        match timed {
+            Err(_) => {
+                tracing::warn!(
+                    "Peer {addr} connect attempt #{attempt} timed out (3s) \
+                     — likely firewall or peer not listening"
+                );
+            }
+            Ok(Ok(stream)) => {
                 stream.set_nodelay(true).ok();
                 let (reader, writer) = stream.into_split();
                 let mut reader = tokio::io::BufReader::new(reader);
@@ -349,10 +371,14 @@ async fn dial_peer(
                     outbound_connected.lock().unwrap().remove(&peer_name);
                 }
             }
-            Err(e) => {
-                tracing::debug!("Peer {addr} connect retry: {e}");
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "Peer {addr} connect attempt #{attempt} failed: {e}"
+                );
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        // First few retries: be quick. After that, back off.
+        let wait = if attempt < 3 { 1 } else { 3 };
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
     }
 }

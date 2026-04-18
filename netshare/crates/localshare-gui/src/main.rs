@@ -1,6 +1,7 @@
 mod app;
 mod bridge;
 mod display;
+mod edge;
 mod theme;
 mod tray;
 mod views;

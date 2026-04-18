@@ -244,6 +244,12 @@ impl LocalShareApp {
             }
             self.monitors[0].active = active_slot == 0;
         }
+
+        // Refresh edge-crossing triggers from the current layout so the
+        // cursor-dwell thread knows which physical screen edge maps to
+        // which peer slot.
+        let triggers = crate::edge::layout_from_monitors(&self.monitors);
+        *self.bridge.edges.lock().unwrap() = triggers;
     }
 }
 
