@@ -87,6 +87,11 @@ where
 
     writer.write_all(&header.to_bytes()).await?;
     writer.write_all(&payload).await?;
+    // MUST flush: callers wrap the TcpStream in BufWriter, so without this
+    // the Hello / HelloResponse / Heartbeat bytes never leave the buffer
+    // and the peer waits for data that was "sent" but not transmitted,
+    // eventually tripping TCP keepalive → WSAECONNRESET (10054).
+    writer.flush().await?;
     Ok(())
 }
 
