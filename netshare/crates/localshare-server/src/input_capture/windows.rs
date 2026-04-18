@@ -118,10 +118,10 @@ unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     let shift = SHIFT_DOWN.with(|c| c.get());
     let alt   = ALT_DOWN.with(|c| c.get());
 
-    // ── Hotkey: Ctrl+Shift+Alt+[1-9] ──────────────────────────────────────
-    // VK '1'..'9' = 0x31..0x39
-    if is_press && ctrl && shift && alt && (0x31..=0x39).contains(&vk) {
-        let slot = (vk - 0x30) as u8; // '1'=1 .. '9'=9
+    // ── Hotkey: Ctrl+Shift+Alt+[0-9] ──────────────────────────────────────
+    // VK '0'..'9' = 0x30..0x39. Slot 0 = host (return control to this PC).
+    if is_press && ctrl && shift && alt && (0x30..=0x39).contains(&vk) {
+        let slot = (vk - 0x30) as u8; // '0'=0 (host) .. '9'=9
         send(CaptureEvent::Hotkey(HotkeyAction::SwitchToSlot(slot)));
         return LRESULT(1); // suppress — do not pass to OS
     }
@@ -129,6 +129,15 @@ unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     // ── Hotkey: Scroll Lock → cycle ────────────────────────────────────────
     if is_press && vk == VK_SCROLL.0 {
         send(CaptureEvent::Hotkey(HotkeyAction::Cycle));
+        return LRESULT(1);
+    }
+
+    // ── Hotkey: Right-Ctrl while forwarding → snap back to host ──────────
+    // Quick escape when the mouse feels "locked" on a remote peer. Only
+    // consume the key when we're actually suppressing (active_slot != 0);
+    // on the host it passes through so apps keep working normally.
+    if is_press && vk == VK_RCONTROL && !shift && !alt && should_suppress() {
+        send(CaptureEvent::Hotkey(HotkeyAction::SwitchToSlot(0)));
         return LRESULT(1);
     }
 
